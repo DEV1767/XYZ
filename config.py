@@ -76,10 +76,26 @@ STCG_RATE: float = 0.15                                              # 15% Short
 LTCG_RATE: float = 0.10                                              # 10% Long Term Capital Gains (>365d)
 LTCG_EXEMPTION: float = 100000.0                                     # First Rs. 1,00,000 exempt under Sec 112A
 
+def safe_float(val: Any, default: float) -> float:
+    try:
+        import re
+        cleaned = re.sub(r"[^\d.]", "", str(val))
+        return float(cleaned) if cleaned else default
+    except Exception:
+        return default
+
+def safe_int(val: Any, default: int) -> int:
+    try:
+        import re
+        cleaned = re.sub(r"[^\d]", "", str(val))
+        return int(cleaned) if cleaned else default
+    except Exception:
+        return default
+
 # Risk Controls & Portfolio Sizing
-STOP_LOSS_PCT: float = float(os.getenv("STOP_LOSS_PCT", "0.03"))     # 3% stop loss
-MIN_TRADE_SIZE: int = int(os.getenv("MIN_TRADE_SIZE", "1"))          # Minimum shares
-CASH_RESERVE_PCT: float = float(os.getenv("CASH_RESERVE_PCT", "0.10"))  # Retain 10% cash reserve
+STOP_LOSS_PCT: float = safe_float(os.getenv("STOP_LOSS_PCT"), 0.03)     # 3% stop loss
+MIN_TRADE_SIZE: int = safe_int(os.getenv("MIN_TRADE_SIZE"), 1)          # Minimum shares
+CASH_RESERVE_PCT: float = safe_float(os.getenv("CASH_RESERVE_PCT"), 0.10)  # Retain 10% cash reserve
 INITIAL_CAPITAL: float = 1000000.0                                   # Rs. 10,00,000 (Ten Lakhs INR)
 MAX_SHORT_HOLD_DAYS: int = 9                                         # Bi-weekly squareoff is on Day 10
 
