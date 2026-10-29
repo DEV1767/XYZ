@@ -149,7 +149,6 @@ class StrategyEngine:
 
                 # Adverse News Catalyst Protection: exit immediately if severe negative news breaks
                 if news_score <= -2:
-                    del self.positions[ticker]
                     return {
                         "ticker": ticker,
                         "action": "SELL",
@@ -161,7 +160,6 @@ class StrategyEngine:
 
                 # Take-Profit: Lock in gains immediately if surge reaches >= 4%
                 if pnl_pct >= TAKE_PROFIT_PCT:
-                    del self.positions[ticker]
                     return {
                         "ticker": ticker,
                         "action": "SELL",
@@ -173,7 +171,6 @@ class StrategyEngine:
 
                 # Stop-Loss: Cut immediately if drops by 2.5%
                 if pnl_pct <= -STOP_LOSS_PCT:
-                    del self.positions[ticker]
                     return {
                         "ticker": ticker,
                         "action": "SELL",
@@ -185,7 +182,6 @@ class StrategyEngine:
 
                 # Target Holding Duration reached
                 if days_held >= TARGET_FORWARD_DAYS:
-                    del self.positions[ticker]
                     return {
                         "ticker": ticker,
                         "action": "SELL",
@@ -201,7 +197,6 @@ class StrategyEngine:
 
                 # Adverse News Catalyst Protection: cover immediately if strong positive news breaks
                 if news_score >= 2:
-                    del self.positions[ticker]
                     return {
                         "ticker": ticker,
                         "action": "COVER",
@@ -213,7 +208,6 @@ class StrategyEngine:
 
                 # Short Take-Profit: Lock in gains immediately if price drops >= 4%
                 if short_pnl_pct >= TAKE_PROFIT_PCT:
-                    del self.positions[ticker]
                     return {
                         "ticker": ticker,
                         "action": "COVER",
@@ -225,7 +219,6 @@ class StrategyEngine:
 
                 # Short Stop-Loss: Cut if price rises 2.5% above short entry
                 if short_pnl_pct <= -STOP_LOSS_PCT:
-                    del self.positions[ticker]
                     return {
                         "ticker": ticker,
                         "action": "COVER",
@@ -237,7 +230,6 @@ class StrategyEngine:
 
                 # Mandatory Settlement Rule: Cover before 10-day auto square-off
                 if days_held >= MAX_SHORT_HOLD_DAYS or days_held >= TARGET_FORWARD_DAYS:
-                    del self.positions[ticker]
                     return {
                         "ticker": ticker,
                         "action": "COVER",
@@ -316,13 +308,6 @@ class StrategyEngine:
 
             shares = self.calculate_batch_shares(trade_budget, latest_close)
             if shares >= MIN_TRADE_SIZE and (shares * latest_close + BROKERAGE_FEE) <= current_cash:
-                self.positions[ticker] = {
-                    "type": "LONG",
-                    "shares": shares,
-                    "entry_price": latest_close,
-                    "entry_date": current_date,
-                    "days_held": 0,
-                }
                 return {
                     "ticker": ticker,
                     "action": "BUY",
@@ -347,13 +332,6 @@ class StrategyEngine:
             shares = self.calculate_batch_shares(trade_budget, latest_close)
             # Short requires 100% margin lock + brokerage
             if shares >= MIN_TRADE_SIZE and (shares * latest_close + BROKERAGE_FEE) <= current_cash:
-                self.positions[ticker] = {
-                    "type": "SHORT",
-                    "shares": shares,
-                    "entry_price": latest_close,
-                    "entry_date": current_date,
-                    "days_held": 0,
-                }
                 return {
                     "ticker": ticker,
                     "action": "SHORT",

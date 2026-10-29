@@ -95,6 +95,13 @@ def run_local_sandbox(days_to_replay: int = 40, delay_sec: float = 0.15) -> None
 
             if action != "HOLD" and qty > 0:
                 trade_val = qty * price
+                if action == "BUY":
+                    engine.positions[ticker] = {"type": "LONG", "shares": qty, "entry_price": price, "days_held": 0}
+                elif action == "SHORT":
+                    engine.positions[ticker] = {"type": "SHORT", "shares": qty, "entry_price": price, "days_held": 0}
+                elif action in ["SELL", "COVER"]:
+                    engine.positions.pop(ticker, None)
+
                 print(f"  * ORDER EXECUTED: {action} {qty} {ticker} @ Rs. {price:.2f} (Val: Rs. {trade_val:,.2f})")
                 print(f"    Reason:  {reason}")
                 print(f"    Latency: {eval_latency_ms:.2f} ms")

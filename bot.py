@@ -42,6 +42,7 @@ from config import (
 )
 from news_features import NewsStateBuffer
 from strategy import StrategyEngine
+from telemetry import TelemetryTracker
 
 
 class TradingBot:
@@ -57,6 +58,7 @@ class TradingBot:
         # In-memory rolling price buffer: ticker -> list of OHLCV dicts (warm-started)
         self.price_buffers: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self.news_buffer = NewsStateBuffer(max_history_days=3)
+        self.telemetry = TelemetryTracker()
 
         self.valid_tickers = self.fetch_active_tickers()
         self.strategy = StrategyEngine(valid_tickers=self.valid_tickers)
@@ -66,10 +68,10 @@ class TradingBot:
 
         # Cache available cash
         self.current_cash = 1000000.0
+        self.current_sim_date = ""
+        self.tick_counter = 0
         self.refresh_cash_balance()
         self.sync_portfolio()
-
-        self.tick_counter = 0
         mode_str = "DRY-RUN (Paper Trading)" if self.dry_run else "LIVE ORDER DISPATCH"
         print(f"[bot] Initialized [{mode_str}] for {len(self.valid_tickers)} tickers. Cash: Rs. {self.current_cash:,.2f}")
 
@@ -199,6 +201,7 @@ class TradingBot:
                     if t not in active_tickers_in_server:
                         del self.strategy.positions[t]
 
+                self.telemetry.update_from_portfolio_api(data, sim_date=self.current_sim_date)
                 print(f"[bot] Synced portfolio from server. Active positions: {len(self.strategy.positions)}, Cash: Rs. {self.current_cash:,.2f}")
         except Exception as e:
             print(f"[bot] Warning: Failed to sync portfolio from server ({e})")
@@ -214,6 +217,27 @@ class TradingBot:
             pass
         return self.current_cash
 
+    def _update_position_on_fill(self, ticker: str, action: str, quantity: int, price: float, sim_date: str = "") -> None:
+        """Updates internal portfolio state upon confirmed order execution."""
+        if action == "BUY":
+            self.strategy.positions[ticker] = {
+                "type": "LONG",
+                "shares": quantity,
+                "entry_price": price,
+                "entry_date": sim_date,
+                "days_held": 0,
+            }
+        elif action == "SHORT":
+            self.strategy.positions[ticker] = {
+                "type": "SHORT",
+                "shares": quantity,
+                "entry_price": price,
+                "entry_date": sim_date,
+                "days_held": 0,
+            }
+        elif action in ["SELL", "COVER"]:
+            self.strategy.positions.pop(ticker, None)
+
     def send_order(self, ticker: str, action: str, quantity: int, price: float, sim_date: str = "", reason: str = "") -> bool:
         """
         Submits market order (BUY, SELL, SHORT, COVER) to POST /api/v1/orders.
@@ -226,10 +250,12 @@ class TradingBot:
         # 1. Client-Side Safeguards (Zero Order Rejection Rule)
         if quantity <= 0:
             print(f"[SAFEGUARD] Aborted order: Quantity must be > 0. Got {quantity}.")
+            self.telemetry.record_safeguard_block("Quantity <= 0")
             return False
 
         if self.valid_tickers and ticker not in self.valid_tickers:
             print(f"[SAFEGUARD] Aborted order: Ticker '{ticker}' is not in active universe.")
+            self.telemetry.record_safeguard_block("Invalid Ticker")
             return False
 
         if action in ["BUY", "SHORT"]:
@@ -242,6 +268,7 @@ class TradingBot:
                     quantity = affordable_qty
                 else:
                     print(f"[SAFEGUARD] Aborting {action} {quantity} {ticker}: Cost Rs. {order_cost:,.2f} exceeds cash Rs. {self.current_cash:,.2f}.")
+                    self.telemetry.record_safeguard_block("Insufficient Capital")
                     return False
 
         elif action == "SELL":
@@ -249,6 +276,7 @@ class TradingBot:
             pos = self.strategy.positions.get(ticker)
             if not pos or pos.get("type") != "LONG":
                 print(f"[SAFEGUARD] Aborting SELL for {ticker}: No open LONG position held.")
+                self.telemetry.record_safeguard_block("No Long Position")
                 return False
             if quantity > pos.get("shares", 0):
                 quantity = pos["shares"]
@@ -258,6 +286,7 @@ class TradingBot:
             pos = self.strategy.positions.get(ticker)
             if not pos or pos.get("type") != "SHORT":
                 print(f"[SAFEGUARD] Aborting COVER for {ticker}: No open SHORT position held.")
+                self.telemetry.record_safeguard_block("No Short Position")
                 return False
             if quantity > pos.get("shares", 0):
                 quantity = pos["shares"]
@@ -275,6 +304,8 @@ class TradingBot:
 
         if self.dry_run:
             print(f"[DRY-RUN PAPER TRADE] Simulated fill: {action} {quantity} {ticker} @ Rs. {price:.2f}. No live API call made.")
+            self._update_position_on_fill(ticker, action, quantity, price, sim_date)
+            self.telemetry.record_order_result(action, quantity, price, success=True, is_dry_run=True)
             return True
 
         max_attempts = 2
@@ -284,10 +315,13 @@ class TradingBot:
                 if r.status_code in [200, 201]:
                     res = r.json()
                     print(f"[ORDER FILLED] {action} {quantity} {ticker} | Status: {res.get('status', 'OK')}")
+                    self._update_position_on_fill(ticker, action, quantity, price, sim_date)
+                    self.telemetry.record_order_result(action, quantity, price, success=True, is_dry_run=False)
                     self.refresh_cash_balance()
                     return True
                 else:
                     print(f"[ORDER REJECTED] HTTP {r.status_code}: {r.text}")
+                    self.telemetry.record_order_result(action, quantity, price, success=False, is_dry_run=False)
                     return False
             except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
                 if attempt < max_attempts:
@@ -295,9 +329,11 @@ class TradingBot:
                     time.sleep(0.5)
                 else:
                     print(f"[ORDER ERROR] Network error submitting order for {ticker} after {max_attempts} attempts: {e}")
+                    self.telemetry.record_order_result(action, quantity, price, success=False, is_dry_run=False)
                     return False
             except Exception as e:
                 print(f"[ORDER ERROR] Unexpected error submitting order for {ticker}: {e}")
+                self.telemetry.record_order_result(action, quantity, price, success=False, is_dry_run=False)
                 return False
 
         return False
@@ -359,11 +395,10 @@ class TradingBot:
         # Retrieve today's news score for this ticker
         news_feat = self.news_buffer.get_features_for_ticker(ticker, sim_date)
         news_score = news_feat["news_score"]
+        self.current_sim_date = sim_date
 
-        # Preserve current position state for rollback in case order fails
-        prev_pos = dict(self.strategy.positions[ticker]) if ticker in self.strategy.positions else None
-
-        # Evaluate strategy (< 5 ms latency)
+        # Evaluate strategy (< 5 ms latency) with exact latency timing
+        t0 = time.perf_counter()
         decision = self.strategy.evaluate_ticker(
             ticker=ticker,
             buffer_df=buffer_df,
@@ -371,6 +406,8 @@ class TradingBot:
             current_cash=self.current_cash,
             current_date=sim_date,
         )
+        latency_ms = (time.perf_counter() - t0) * 1000.0
+        self.telemetry.record_latency(latency_ms)
 
         action = decision["action"]
         qty = decision["quantity"]
@@ -378,7 +415,7 @@ class TradingBot:
         reason = decision["reason"]
 
         if action in ["BUY", "SELL", "SHORT", "COVER"] and qty > 0:
-            ok = self.send_order(
+            self.send_order(
                 ticker=ticker,
                 action=action,
                 quantity=qty,
@@ -386,14 +423,8 @@ class TradingBot:
                 sim_date=sim_date,
                 reason=reason,
             )
-            if not ok and not self.dry_run:
-                # Revert local position if order failed so memory stays in sync with server
-                if prev_pos:
-                    self.strategy.positions[ticker] = prev_pos
-                else:
-                    self.strategy.positions.pop(ticker, None)
         else:
-            print(f"[TICK] {sim_date} | {ticker:10s} Close={close_price:7.2f} | Action: {action} ({reason[:55]}...)")
+            print(f"[TICK] {sim_date} | {ticker:10s} Close={close_price:7.2f} | Latency={latency_ms:.2f}ms | Action: {action} ({reason[:50]}...)")
 
         # Periodically refresh full portfolio state from server
         self.tick_counter += 1
@@ -500,16 +531,8 @@ class TradingBot:
         finally:
             consumer.close()
             self.refresh_cash_balance()
-            print("\n" + "=" * 70)
-            print(" EXECUTION SESSION SUMMARY")
-            print("=" * 70)
-            print(f"  Total Ticks Processed: {ticks_count}")
-            print(f"  Total News Flashes:    {news_count}")
-            print(f"  Active Positions:      {len(self.strategy.positions)} stocks")
-            for t, pos in self.strategy.positions.items():
-                print(f"    -> {t}: {pos['type']} {pos['shares']} shares @ Rs. {pos['entry_price']:.2f} (Held {pos['days_held']}d)")
-            print(f"  Cash Remaining:        Rs. {self.current_cash:,.2f}")
-            print("=" * 70 + "\n")
+            self.sync_portfolio()
+            self.telemetry.print_jury_scorecard()
 
 
 if __name__ == "__main__":
@@ -517,13 +540,19 @@ if __name__ == "__main__":
     parser.add_argument("--live", action="store_true", help="Launch live Kafka trading loop")
     parser.add_argument("--dry-run", action="store_true", help="Paper trade without sending live REST orders")
     parser.add_argument("--ticks", type=int, default=0, help="Optional number of ticks to process before stopping")
+    parser.add_argument("--scorecard", action="store_true", help="Print live 5-Pillar Executive Jury Scorecard and exit")
     args = parser.parse_args()
 
     bot = TradingBot(dry_run=args.dry_run)
-    if args.live:
+    if args.scorecard:
+        bot.sync_portfolio()
+        bot.telemetry.print_jury_scorecard()
+    elif args.live:
         bot.run(max_ticks=args.ticks)
     else:
         print("\n[bot] Self-test passed.")
+        print("  To view the Live 5-Pillar Jury Scorecard:")
+        print("      python bot.py --scorecard")
         print("  To test in Sandbox (Paper Trading - zero risk):")
         print("      python bot.py --live --dry-run")
         print("  To test in Sandbox (Live Order Execution):")
