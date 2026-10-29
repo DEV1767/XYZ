@@ -103,11 +103,13 @@ LTCG_RATE: float = 0.10                                                  # 10% L
 LTCG_EXEMPTION: float = 100000.0                                         # First Rs. 1,00,000 exempt under Sec 112A
 
 # Risk Controls & Portfolio Sizing
-STOP_LOSS_PCT: float = safe_float(os.getenv("STOP_LOSS_PCT"), 0.03)      # 3% stop loss
+TAKE_PROFIT_PCT: float = safe_float(os.getenv("TAKE_PROFIT_PCT"), 0.04)  # 4% take-profit target
+STOP_LOSS_PCT: float = safe_float(os.getenv("STOP_LOSS_PCT"), 0.025)     # 2.5% strict stop loss (Reward:Risk = 1.6:1)
 MIN_TRADE_SIZE: int = safe_int(os.getenv("MIN_TRADE_SIZE"), 1)           # Minimum shares
-CASH_RESERVE_PCT: float = safe_float(os.getenv("CASH_RESERVE_PCT"), 0.10) # Retain 10% cash reserve
+CASH_RESERVE_PCT: float = safe_float(os.getenv("CASH_RESERVE_PCT"), 0.15) # Retain 15% cash reserve
 INITIAL_CAPITAL: float = 1000000.0                                       # Rs. 10,00,000 (Ten Lakhs INR)
 MAX_SHORT_HOLD_DAYS: int = 9                                             # Bi-weekly squareoff is on Day 10
+ORDER_TIMEOUT_SEC: float = 5.0                                           # Resilient HTTP order timeout
 
 # =====================================================================
 # Machine Learning Target & Splits

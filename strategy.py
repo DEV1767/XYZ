@@ -31,6 +31,7 @@ from config import (
     PRED_BUY_THRESHOLD,
     PRED_SELL_THRESHOLD,
     STOP_LOSS_PCT,
+    TAKE_PROFIT_PCT,
     TARGET_FORWARD_DAYS,
 )
 from features import combined_signal, compute_features_live
@@ -134,15 +135,43 @@ class StrategyEngine:
         if ticker in self.positions:
             pos = self.positions[ticker]
             pos_type = pos["type"]
-            entry_price = float(pos["entry_price"])
+            entry_price = float(pos.get("entry_price", 0.0))
+            if entry_price <= 0:
+                entry_price = latest_close
+                pos["entry_price"] = entry_price
+
             shares = pos["shares"]
             days_held = pos.get("days_held", 0) + 1
             pos["days_held"] = days_held
 
             if pos_type == "LONG":
-                pnl_pct = (latest_close - entry_price) / entry_price
+                pnl_pct = (latest_close - entry_price) / entry_price if entry_price > 0 else 0.0
 
-                # Stop-Loss: Cut immediately if drops by 3%
+                # Adverse News Catalyst Protection: exit immediately if severe negative news breaks
+                if news_score <= -2:
+                    del self.positions[ticker]
+                    return {
+                        "ticker": ticker,
+                        "action": "SELL",
+                        "quantity": shares,
+                        "price": latest_close,
+                        "reason": f"LONG ADVERSE NEWS CATALYST (Score: {news_score:+d}). Exiting before drop worsens.",
+                        "confidence": 0.95,
+                    }
+
+                # Take-Profit: Lock in gains immediately if surge reaches >= 4%
+                if pnl_pct >= TAKE_PROFIT_PCT:
+                    del self.positions[ticker]
+                    return {
+                        "ticker": ticker,
+                        "action": "SELL",
+                        "quantity": shares,
+                        "price": latest_close,
+                        "reason": f"LONG TAKE-PROFIT (+{pnl_pct:.2%} >= +{TAKE_PROFIT_PCT:.1%}). Locking in peak gains early.",
+                        "confidence": 0.95,
+                    }
+
+                # Stop-Loss: Cut immediately if drops by 2.5%
                 if pnl_pct <= -STOP_LOSS_PCT:
                     del self.positions[ticker]
                     return {
@@ -168,9 +197,33 @@ class StrategyEngine:
 
             elif pos_type == "SHORT":
                 # For short: profit when price drops, loss when price rises
-                short_pnl_pct = (entry_price - latest_close) / entry_price
+                short_pnl_pct = (entry_price - latest_close) / entry_price if entry_price > 0 else 0.0
 
-                # Short Stop-Loss: Cut if price rises 3% above short entry
+                # Adverse News Catalyst Protection: cover immediately if strong positive news breaks
+                if news_score >= 2:
+                    del self.positions[ticker]
+                    return {
+                        "ticker": ticker,
+                        "action": "COVER",
+                        "quantity": shares,
+                        "price": latest_close,
+                        "reason": f"SHORT ADVERSE NEWS CATALYST (Score: {news_score:+d}). Covering before squeeze worsens.",
+                        "confidence": 0.95,
+                    }
+
+                # Short Take-Profit: Lock in gains immediately if price drops >= 4%
+                if short_pnl_pct >= TAKE_PROFIT_PCT:
+                    del self.positions[ticker]
+                    return {
+                        "ticker": ticker,
+                        "action": "COVER",
+                        "quantity": shares,
+                        "price": latest_close,
+                        "reason": f"SHORT TAKE-PROFIT (+{short_pnl_pct:.2%} >= +{TAKE_PROFIT_PCT:.1%}). Locking in gains on price drop.",
+                        "confidence": 0.95,
+                    }
+
+                # Short Stop-Loss: Cut if price rises 2.5% above short entry
                 if short_pnl_pct <= -STOP_LOSS_PCT:
                     del self.positions[ticker]
                     return {
@@ -236,12 +289,31 @@ class StrategyEngine:
                 "confidence": confidence,
             }
 
-        # Available investable capital reserving 20% cushion
+        # Available investable capital reserving cash cushion
         investable_cash = current_cash * (1.0 - CASH_RESERVE_PCT)
         trade_budget = min(investable_cash * TARGET_ALLOCATION_PCT, 150000.0)
 
-        # ENTRY 1: BUY (Go Long)
+        # Asymmetric News Multiplier: boost size by 25% on strong news catalyst
+        if news_score >= 2 or news_score <= -2:
+            trade_budget = min(investable_cash * (TARGET_ALLOCATION_PCT * 1.25), 185000.0)
+
+        # Trend Confirmation: verify price relative to 20-day moving average
+        sma_20 = float(buffer_df["close"].rolling(20, min_periods=5).mean().iloc[-1])
+        is_uptrend = (latest_close >= sma_20 * 0.985) or (price_trend >= -0.01)
+        is_downtrend = (latest_close <= sma_20 * 1.015) or (price_trend <= 0.01)
+
+        # ENTRY 1: BUY (Go Long) with Trend Confirmation
         if signal == "BUY" and ticker not in self.positions:
+            if not is_uptrend and news_score < 2:
+                return {
+                    "ticker": ticker,
+                    "action": "HOLD",
+                    "quantity": 0,
+                    "price": latest_close,
+                    "reason": f"Model bullish but filtered: Close ({latest_close:.2f}) < 20-day SMA ({sma_20:.2f}). Awaiting trend confirmation.",
+                    "confidence": confidence,
+                }
+
             shares = self.calculate_batch_shares(trade_budget, latest_close)
             if shares >= MIN_TRADE_SIZE and (shares * latest_close + BROKERAGE_FEE) <= current_cash:
                 self.positions[ticker] = {
@@ -260,8 +332,18 @@ class StrategyEngine:
                     "confidence": confidence,
                 }
 
-        # ENTRY 2: SHORT (Go Short on strong bearish signal & negative catalyst)
-        elif signal in ["SELL", "SHORT"] and ticker not in self.positions and news_score <= -1:
+        # ENTRY 2: SHORT (Go Short on strong bearish signal & negative catalyst with Downtrend Confirmation)
+        elif signal in ["SELL", "SHORT"] and ticker not in self.positions:
+            if not is_downtrend and news_score > -2:
+                return {
+                    "ticker": ticker,
+                    "action": "HOLD",
+                    "quantity": 0,
+                    "price": latest_close,
+                    "reason": f"Model bearish but filtered: Close ({latest_close:.2f}) > 20-day SMA ({sma_20:.2f}). Awaiting downtrend confirmation.",
+                    "confidence": confidence,
+                }
+
             shares = self.calculate_batch_shares(trade_budget, latest_close)
             # Short requires 100% margin lock + brokerage
             if shares >= MIN_TRADE_SIZE and (shares * latest_close + BROKERAGE_FEE) <= current_cash:
