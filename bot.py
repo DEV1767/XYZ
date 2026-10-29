@@ -274,16 +274,35 @@ class TradingBot:
             print(f" Execution Limit: Will process {max_ticks} incoming ticks and report summary.")
         print("=" * 70 + "\n")
 
-        consumer = KafkaConsumer(
-            KAFKA_TICKS_TOPIC,
-            KAFKA_NEWS_TOPIC,
-            bootstrap_servers=[KAFKA_BOOTSTRAP_SERVERS],
-            group_id=KAFKA_GROUP_COLLECTOR,
-            auto_offset_reset="latest",
-            enable_auto_commit=False,
-            value_deserializer=lambda m: json.loads(m.decode("utf-8")),
-            consumer_timeout_ms=5000,
-        )
+        consumer = None
+        retry_count = 0
+        max_retries = 5
+
+        while consumer is None:
+            try:
+                consumer = KafkaConsumer(
+                    KAFKA_TICKS_TOPIC,
+                    KAFKA_NEWS_TOPIC,
+                    bootstrap_servers=[KAFKA_BOOTSTRAP_SERVERS],
+                    group_id=KAFKA_GROUP_COLLECTOR,
+                    auto_offset_reset="latest",
+                    enable_auto_commit=False,
+                    api_version=(2, 8, 0),
+                    request_timeout_ms=10000,
+                    value_deserializer=lambda m: json.loads(m.decode("utf-8")),
+                    consumer_timeout_ms=5000,
+                )
+                print("[bot] Successfully connected to Kafka stream!")
+            except Exception as e:
+                retry_count += 1
+                if retry_count >= max_retries:
+                    print(f"\n[bot] ERROR: Could not connect to Kafka broker at {KAFKA_BOOTSTRAP_SERVERS} ({e}).")
+                    print("           REASON: Your laptop cannot reach 192.168.65.157.")
+                    print("           FIX: Make sure your laptop Wi-Fi is connected to the official VENUE Wi-Fi network,")
+                    print("                NOT a mobile hotspot or external connection.")
+                    return
+                print(f"[bot] Connecting to Kafka broker ({e}). Retrying in 2s (Attempt {retry_count}/{max_retries})...")
+                time.sleep(2)
 
         ticks_count = 0
         news_count = 0
