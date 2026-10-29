@@ -1,23 +1,23 @@
 """
-Trading Strategy and Risk Management Engine.
+Trading Strategy and Risk Management Engine (Manthan 2026).
 
-Fully conforms to the Manthan 2026 Problem Statement and Trading Basics Primer:
-1. Long Trading: BUY -> SELL (PRIMARY mode — secular bull market)
-2. Short Selling: SHORT -> COVER — DISABLED (ENABLE_SHORT_SELLING=False) to prevent bull-market whipsaws
-3. Concentration Model: MAX 4 active positions, 25% allocation per stock
-4. Cash Deployment: Reserves only 3% cash cushion (97% capital deployed at all times)
-5. Batch Sizing: Sized in large batches to minimize brokerage/DP fee friction
-6. Exit Logic: Trailing Stop (8% from peak after 12%+ gain) replaces rigid time-based exits
-7. Fast Evaluation: Runs in < 20 ms per ticker (target < 3000 ms jury limit)
-
-Ground Truth from historical data (2024-11-15 to 2026-10-23):
-  PLNX  +199% — key multibagger; model prob 0.683 at Day 20 (catch early)
-  BLUX   +24% — breakout Day 5; prob 0.454 at Day 20 (needs lower threshold)
-  MOTR   +33% — breakout Dec 2025; prob 0.529 at Day 60
-  HAVN   +30% — breakout Jun 2026; prob 0.470 at Day 20
-  HMDP   -22% — correctly filtered by model (prob ~0.40)
-  ORCX   -31% — correctly filtered early (prob ~0.46)
-  DSNY    -2% — correctly filtered (prob ~0.43)
+Enforces:
+1. Triple Barrier exit engine matching labeling:
+   stop   = entry * (1 - BARRIER_DOWN_ATR * atr_pct_at_entry)
+   target = entry * (1 + BARRIER_UP_ATR * atr_pct_at_entry)
+   time exit after HORIZON_DAYS.
+   Tracks atr_pct_at_entry, stop_price, target_price, and days_held (incremented once per date).
+2. Single ATR trailing stop that activates after +1 ATR gain (replaces all old ratchets).
+3. Cross-sectional ranking entry: ranks all universe tickers by model probability each day
+   and selects top-N free slots (up to MAX_CONCURRENT_POSITIONS).
+4. Strict trend filters: require latest_close > sma_20 AND sma_5 > sma_20 (strict AND, not OR).
+5. News as veto only: score <= -2 blocks entry or forces defensive exit. News NEVER bypasses
+   trend filters or boosts trade size. Logs news_score for every executed trade.
+6. Single risk parity sizing path: shares = (equity * 0.01) / (entry - stop_price),
+   capped at MAX_POSITION_PCT of equity (25%).
+7. Counts and logs all model inference exceptions loudly (no silent fallback to 0.50).
+8. Longs exit ONLY via stop / target / trailing stop / time exit / news veto.
+   Model SELL signals are ignored for long positions.
 """
 
 from __future__ import annotations
@@ -26,34 +26,35 @@ from pathlib import Path
 from typing import Any
 
 import joblib
+import numpy as np
 import pandas as pd
 
 sys.path.append(str(Path(__file__).resolve().parent))
 
 from config import (
+    ATR_PERIOD,
+    BARRIER_DOWN_ATR,
+    BARRIER_UP_ATR,
     BROKERAGE_FEE,
     CASH_RESERVE_PCT,
     DP_CHARGE,
     ENABLE_SHORT_SELLING,
     FEATURE_NAMES_FILE,
+    HORIZON_DAYS,
     MAX_CONCURRENT_POSITIONS,
-    MAX_SHORT_HOLD_DAYS,
+    MAX_POSITION_PCT,
     MIN_TRADE_SIZE,
     MODEL_FILE,
+    MODELS_DIR,
     PRED_BUY_THRESHOLD,
     PRED_SELL_THRESHOLD,
-    STOP_LOSS_PCT,
-    TARGET_FORWARD_DAYS,
-    TRAILING_STOP_PCT,
 )
-from features import combined_signal, compute_features_live
+from features import compute_atr, compute_features_live
 
 
 class StrategyEngine:
     """
-    Autonomous multi-asset strategy evaluator.
-    Manages active long & short positions, evaluates combined ML + news signals,
-    and enforces strict risk management to prevent drawdowns.
+    Autonomous multi-asset strategy evaluator and risk management engine.
     """
 
     def __init__(
@@ -61,45 +62,404 @@ class StrategyEngine:
         valid_tickers: list[str] | None = None,
         model_path: Path = MODEL_FILE,
         features_path: Path = FEATURE_NAMES_FILE,
+        metadata_path: Path = MODELS_DIR / "model_metadata.joblib",
     ):
         self.valid_tickers = set(t.upper() for t in valid_tickers) if valid_tickers else set()
         self.model = None
-        self.feature_cols = None
+        self.feature_cols: list[str] | None = None
+        self.buy_threshold: float = PRED_BUY_THRESHOLD
+        self.inference_exception_count: int = 0
 
+        # Load metadata if available (to get dynamically chosen threshold from walk-forward validation)
+        if metadata_path.exists():
+            try:
+                meta = joblib.load(metadata_path)
+                if "chosen_threshold" in meta:
+                    self.buy_threshold = float(meta["chosen_threshold"])
+                    print(f"[strategy] Loaded validation-chosen threshold: {self.buy_threshold:.4f}")
+            except Exception as e:
+                print(f"[strategy] Warning loading metadata ({e}), using default threshold: {self.buy_threshold:.4f}")
+
+        # Load model and feature list
         if model_path.exists() and features_path.exists():
             try:
                 self.model = joblib.load(model_path)
                 self.feature_cols = joblib.load(features_path)
                 print(f"[strategy] Loaded model '{type(self.model).__name__}' with {len(self.feature_cols)} features.")
             except Exception as e:
-                print(f"[strategy] Warning: Could not load model ({e}). Operating in rule-based fallback.")
+                print(f"[strategy] Warning: Could not load model ({e}). Inference will fail loudly.")
         else:
-            print("[strategy] Model not found. Train first with 'python train.py'.")
+            print("[strategy] Model artifacts not found. Train first with 'python train.py'.")
 
-        # Active portfolio state:
-        # ticker -> {"type": "LONG"|"SHORT", "shares": int, "entry_price": float, "days_held": int}
+        # Active positions: ticker -> {
+        #   "type": "LONG",
+        #   "shares": int,
+        #   "entry_price": float,
+        #   "atr_pct_at_entry": float,
+        #   "stop_price": float,
+        #   "target_price": float,
+        #   "peak_price": float,
+        #   "days_held": int,
+        #   "last_evaluated_date": str,
+        #   "trailing_stop_active": bool,
+        #   "news_score_entry": float,
+        # }
         self.positions: dict[str, dict[str, Any]] = {}
 
     def set_valid_tickers(self, tickers: list[str]) -> None:
         """Updates the active ticker whitelist."""
         self.valid_tickers = set(t.upper() for t in tickers)
 
-    def calculate_batch_shares(self, budget: float, price: float) -> int:
+    def calculate_risk_shares(
+        self,
+        equity: float,
+        entry: float,
+        stop_price: float,
+        available_cash: float,
+    ) -> int:
         """
-        Calculates whole share quantity in batches (recommended 50+ shares where possible)
-        to minimize the friction percentage of flat brokerage fees.
+        Single Risk Parity Sizing Path:
+          Risk budget = 1% of total equity
+          Per-share risk = entry - stop_price
+          shares = (equity * 0.01) / (entry - stop_price)
+          Capped at MAX_POSITION_PCT (25%) of equity and liquid cash.
         """
-        if price <= 0 or budget < price:
+        if entry <= 0 or equity <= 0:
             return 0
-        raw_shares = int(budget // price)
-        if raw_shares <= 0:
-            return 0
-        # Round to nearest batch of 10 or 25 if large enough
-        if raw_shares >= 100:
-            return (raw_shares // 25) * 25
-        elif raw_shares >= 20:
-            return (raw_shares // 10) * 10
-        return raw_shares
+
+        per_share_risk = entry - stop_price
+        if per_share_risk <= 0:
+            # Fallback per-share risk if stop is invalid
+            per_share_risk = entry * 0.05
+
+        risk_budget = equity * 0.01
+        risk_shares = int(risk_budget / per_share_risk)
+
+        # Capital cap: 25% of total equity
+        max_capital = equity * MAX_POSITION_PCT
+        cap_shares = int(max_capital / entry)
+
+        shares = min(risk_shares, cap_shares)
+
+        # Cash constraint
+        max_cash_shares = int(max(0.0, (available_cash - BROKERAGE_FEE)) // entry)
+        shares = min(shares, max_cash_shares)
+
+        return shares if shares >= MIN_TRADE_SIZE else 0
+
+    def get_atr_pct(self, buffer_df: pd.DataFrame) -> float:
+        """Extracts or computes atr_pct (ATR_PERIOD / close) on latest bar."""
+        if len(buffer_df) < ATR_PERIOD + 1:
+            raise ValueError(f"Insufficient bars to compute ATR ({len(buffer_df)} < {ATR_PERIOD + 1})")
+        latest_close = float(buffer_df["close"].iloc[-1])
+        atr_series = compute_atr(buffer_df["high"], buffer_df["low"], buffer_df["close"], period=ATR_PERIOD)
+        latest_atr = float(atr_series.iloc[-1])
+        if np.isnan(latest_atr) or latest_close <= 0:
+            raise ValueError("Computed ATR is NaN or close <= 0.")
+        return latest_atr / latest_close
+
+    def evaluate_position_exit(
+        self,
+        ticker: str,
+        latest_close: float,
+        news_score: float = 0.0,
+        current_date: str = "",
+    ) -> dict[str, Any] | None:
+        """
+        Evaluates exit conditions for an active position:
+        1. News veto (score <= -2)
+        2. Strict stop-loss (close <= stop_price)
+        3. Target reached (close >= target_price)
+        4. Single ATR trailing stop after +1 ATR gain
+        5. Time exit (days_held >= HORIZON_DAYS)
+        Returns decision dict if an exit is triggered, else None.
+        """
+        if ticker not in self.positions:
+            return None
+
+        pos = self.positions[ticker]
+        pos_type = pos.get("type", "LONG")
+        shares = int(pos["shares"])
+        entry = float(pos["entry_price"])
+        atr_pct = float(pos.get("atr_pct_at_entry", 0.02))
+
+        # Ensure stop_price and target_price are defined
+        if "stop_price" not in pos:
+            pos["stop_price"] = round(entry * (1.0 - BARRIER_DOWN_ATR * atr_pct), 2)
+        if "target_price" not in pos:
+            pos["target_price"] = round(entry * (1.0 + BARRIER_UP_ATR * atr_pct), 2)
+
+        # Increment days_held once per unique calendar date
+        last_eval_date = pos.get("last_evaluated_date", "")
+        if current_date and current_date != last_eval_date:
+            pos["days_held"] = pos.get("days_held", 0) + 1
+            pos["last_evaluated_date"] = current_date
+
+        days_held = pos.get("days_held", 0)
+
+        # 1. News veto exit
+        if news_score <= -2:
+            return {
+                "ticker": ticker,
+                "action": "SELL",
+                "quantity": shares,
+                "price": latest_close,
+                "reason": f"NEWS VETO EXIT (news_score {news_score:+.1f} <= -2.0). Defensive liquidation.",
+                "confidence": 1.0,
+                "news_score": news_score,
+                "days_held": days_held,
+            }
+
+        # 2. Single ATR Trailing Stop (activates after +1 ATR gain)
+        one_atr_price = entry * (1.0 + 1.0 * atr_pct)
+        if latest_close >= one_atr_price:
+            pos["trailing_stop_active"] = True
+
+        if pos.get("trailing_stop_active", False):
+            peak_price = max(float(pos.get("peak_price", entry)), latest_close)
+            pos["peak_price"] = peak_price
+            atr_trail_stop = round(peak_price * (1.0 - 1.0 * atr_pct), 2)
+            if atr_trail_stop > pos["stop_price"]:
+                pos["stop_price"] = atr_trail_stop
+
+            if latest_close <= pos["stop_price"]:
+                return {
+                    "ticker": ticker,
+                    "action": "SELL",
+                    "quantity": shares,
+                    "price": latest_close,
+                    "reason": f"ATR TRAILING STOP (Close Rs.{latest_close:.2f} <= Trail Stop Rs.{pos['stop_price']:.2f} from peak Rs.{peak_price:.2f}).",
+                    "confidence": 0.95,
+                    "news_score": news_score,
+                    "days_held": days_held,
+                }
+
+        # 3. Strict Initial Stop-Loss
+        if latest_close <= pos["stop_price"]:
+            return {
+                "ticker": ticker,
+                "action": "SELL",
+                "quantity": shares,
+                "price": latest_close,
+                "reason": f"STOP LOSS HIT (Close Rs.{latest_close:.2f} <= Stop Rs.{pos['stop_price']:.2f}).",
+                "confidence": 1.0,
+                "news_score": news_score,
+                "days_held": days_held,
+            }
+
+        # 4. Take-Profit Target Reached
+        if latest_close >= pos["target_price"]:
+            return {
+                "ticker": ticker,
+                "action": "SELL",
+                "quantity": shares,
+                "price": latest_close,
+                "reason": f"TARGET REACHED (Close Rs.{latest_close:.2f} >= Target Rs.{pos['target_price']:.2f}).",
+                "confidence": 1.0,
+                "news_score": news_score,
+                "days_held": days_held,
+            }
+
+        # 5. Time Exit after HORIZON_DAYS
+        if days_held >= HORIZON_DAYS:
+            pnl_pct = (latest_close - entry) / entry if entry > 0 else 0.0
+            return {
+                "ticker": ticker,
+                "action": "SELL",
+                "quantity": shares,
+                "price": latest_close,
+                "reason": f"TIME EXIT (Horizon of {HORIZON_DAYS} days reached, held {days_held} days, P&L {pnl_pct:+.2%}).",
+                "confidence": 0.90,
+                "news_score": news_score,
+                "days_held": days_held,
+            }
+
+        return None
+
+    def evaluate_daily_universe(
+        self,
+        daily_buffers: dict[str, pd.DataFrame],
+        daily_news_scores: dict[str, float] | None = None,
+        current_cash: float = 1000000.0,
+        current_equity: float = 1000000.0,
+        current_date: str = "",
+        market_df: pd.DataFrame | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Daily universe evaluator:
+        1. Checks exits for all currently held positions.
+        2. Gathers candidate tickers passing strict trend filters and news veto.
+        3. Computes model probability score (logging exceptions).
+        4. Cross-sectionally ranks candidates by model score.
+        5. Selects top free slots (up to MAX_CONCURRENT_POSITIONS).
+        6. Sizes each entry with single risk parity sizing.
+        """
+        decisions: list[dict[str, Any]] = []
+        news_map = daily_news_scores or {}
+
+        # 1. Process exits for held positions
+        exited_tickers: set[str] = set()
+        for ticker in list(self.positions.keys()):
+            if ticker not in daily_buffers or daily_buffers[ticker].empty:
+                continue
+            buf = daily_buffers[ticker]
+            latest_close = float(buf["close"].iloc[-1])
+            news_sc = float(news_map.get(ticker, 0.0))
+
+            exit_decision = self.evaluate_position_exit(
+                ticker=ticker,
+                latest_close=latest_close,
+                news_score=news_sc,
+                current_date=current_date,
+            )
+            if exit_decision is not None:
+                decisions.append(exit_decision)
+                exited_tickers.add(ticker)
+                print(f"[strategy] EXECUTED EXIT for {ticker}: {exit_decision['reason']} | news_score: {news_sc:+.1f}")
+
+        # Update remaining active positions
+        for t in exited_tickers:
+            self.positions.pop(t, None)
+
+        # 2. Check available entry slots
+        active_count = len(self.positions)
+        free_slots = MAX_CONCURRENT_POSITIONS - active_count
+        if free_slots <= 0:
+            return decisions
+
+        # 3. Evaluate and rank candidate entries
+        candidates: list[dict[str, Any]] = []
+
+        for ticker, buf in sorted(daily_buffers.items()):
+            ticker = ticker.upper()
+            if self.valid_tickers and ticker not in self.valid_tickers:
+                continue
+            if ticker in self.positions or ticker in exited_tickers:
+                continue
+            if len(buf) < 100:
+                continue
+
+            latest_close = float(buf["close"].iloc[-1])
+            sma_5 = float(buf["close"].rolling(5).mean().iloc[-1])
+            sma_20 = float(buf["close"].rolling(20).mean().iloc[-1])
+
+            # Requirement 4c: Strict Trend Filters (latest_close > sma_20 AND sma_5 > sma_20)
+            if not (latest_close > sma_20 and sma_5 > sma_20):
+                continue
+
+            # Requirement 4d: News as veto only (score <= -2 blocks entry)
+            news_sc = float(news_map.get(ticker, 0.0))
+            if news_sc <= -2.0:
+                continue
+
+            # Requirement 4f: Model inference with exception logging
+            if self.model is None or not self.feature_cols:
+                continue
+
+            try:
+                feat_row = compute_features_live(
+                    buf,
+                    feature_cols=self.feature_cols,
+                    market_df=market_df,
+                )
+                if hasattr(self.model, "predict_proba"):
+                    score = float(self.model.predict_proba(feat_row)[0, 1])
+                else:
+                    score = float(self.model.predict(feat_row)[0])
+            except Exception as err:
+                self.inference_exception_count += 1
+                print(f"[strategy] Inference Exception #{self.inference_exception_count} for {ticker}: {err}")
+                continue
+
+            # Requirement 4c: Subject to minimum score from train.py
+            if score < self.buy_threshold:
+                continue
+
+            try:
+                atr_pct = self.get_atr_pct(buf)
+            except Exception as err:
+                self.inference_exception_count += 1
+                print(f"[strategy] ATR Exception for {ticker}: {err}")
+                continue
+
+            candidates.append({
+                "ticker": ticker,
+                "score": score,
+                "latest_close": latest_close,
+                "atr_pct": atr_pct,
+                "news_score": news_sc,
+                "sma_5": sma_5,
+                "sma_20": sma_20,
+            })
+
+        if not candidates:
+            return decisions
+
+        # Requirement 4c: Rank candidates cross-sectionally by model score descending
+        candidates.sort(key=lambda c: c["score"], reverse=True)
+        selected = candidates[:free_slots]
+
+        # Requirement 4e: Single Risk Parity Sizing Path
+        available_cash = current_cash
+        for item in selected:
+            tck = item["ticker"]
+            entry = item["latest_close"]
+            atr_pct = item["atr_pct"]
+            stop_price = round(entry * (1.0 - BARRIER_DOWN_ATR * atr_pct), 2)
+            target_price = round(entry * (1.0 + BARRIER_UP_ATR * atr_pct), 2)
+
+            shares = self.calculate_risk_shares(
+                equity=current_equity,
+                entry=entry,
+                stop_price=stop_price,
+                available_cash=available_cash,
+            )
+
+            if shares < MIN_TRADE_SIZE:
+                continue
+
+            trade_cost = shares * entry + BROKERAGE_FEE
+            available_cash -= trade_cost
+
+            # Register position internally
+            self.positions[tck] = {
+                "type": "LONG",
+                "shares": shares,
+                "entry_price": entry,
+                "atr_pct_at_entry": atr_pct,
+                "stop_price": stop_price,
+                "target_price": target_price,
+                "peak_price": entry,
+                "days_held": 0,
+                "last_evaluated_date": current_date,
+                "trailing_stop_active": False,
+                "news_score_entry": item["news_score"],
+            }
+
+            dec = {
+                "ticker": tck,
+                "action": "BUY",
+                "quantity": shares,
+                "price": entry,
+                "reason": (
+                    f"CROSS-SECTIONAL BUY (Rank score: {item['score']:.4f} >= {self.buy_threshold:.4f} | "
+                    f"Close Rs.{entry:.2f} > 20-SMA Rs.{item['sma_20']:.2f} & 5-SMA > 20-SMA | "
+                    f"Stop: Rs.{stop_price:.2f}, Target: Rs.{target_price:.2f})"
+                ),
+                "confidence": round(item["score"], 4),
+                "model_prob": item["score"],
+                "news_score": item["news_score"],
+                "stop_price": stop_price,
+                "target_price": target_price,
+                "atr_pct": atr_pct,
+            }
+            decisions.append(dec)
+            print(
+                f"[strategy] EXECUTED BUY for {tck}: {shares} shares @ Rs.{entry:.2f} | "
+                f"score: {item['score']:.4f} | news_score: {item['news_score']:+.1f}"
+            )
+
+        return decisions
 
     def evaluate_ticker(
         self,
@@ -108,21 +468,23 @@ class StrategyEngine:
         news_score: int | float = 0,
         current_cash: float = 1000000.0,
         current_date: str = "",
+        current_equity: float | None = None,
+        market_df: pd.DataFrame | None = None,
     ) -> dict[str, Any]:
         """
-        Evaluates a ticker at daily market close and outputs an order decision.
-        Actions: 'BUY', 'SELL', 'SHORT', 'COVER', 'HOLD'.
+        Evaluates a single ticker at market bar close.
+        Supports single-asset calls from live feeds or test runners.
+        Enforces identical barrier logic, trend filters, news veto, and risk sizing.
         """
         ticker = ticker.upper()
 
-        # Whitelist verification
         if self.valid_tickers and ticker not in self.valid_tickers:
             return {
                 "ticker": ticker,
                 "action": "HOLD",
                 "quantity": 0,
                 "price": 0.0,
-                "reason": f"Ticker '{ticker}' not in active API stocks universe. Skipped.",
+                "reason": f"Ticker '{ticker}' not in active API whitelist. Skipped.",
                 "confidence": 0.0,
             }
 
@@ -137,237 +499,183 @@ class StrategyEngine:
             }
 
         latest_close = float(buffer_df["close"].iloc[-1])
+        equity = current_equity if (current_equity is not None and current_equity > 0) else current_cash
 
-        # Compute features & model probability early for complete diagnostic logging
-        feat_dict: dict[str, float] = {}
-        price_prob = 0.50
-        feat_row = None
-        if self.model and self.feature_cols:
-            try:
-                feat_row = compute_features_live(buffer_df, feature_cols=self.feature_cols)
-                if feat_row is not None and not feat_row.empty:
-                    feat_dict = feat_row.iloc[0].to_dict()
-                if hasattr(self.model, "predict_proba"):
-                    price_prob = float(self.model.predict_proba(feat_row)[0, 1])
-                else:
-                    price_prob = float(self.model.predict(feat_row)[0])
-            except Exception as e:
-                print(f"[strategy] Model inference error for {ticker}: {e}")
+        # 1. Active Position Exit Evaluation
+        if ticker in self.positions:
+            exit_decision = self.evaluate_position_exit(
+                ticker=ticker,
+                latest_close=latest_close,
+                news_score=float(news_score),
+                current_date=current_date,
+            )
+            if exit_decision is not None:
+                self.positions.pop(ticker, None)
+                print(f"[strategy] EXECUTED EXIT for {ticker}: {exit_decision['reason']} | news_score: {news_score:+.1f}")
+                return exit_decision
 
-        price_trend = float(buffer_df["close"].pct_change(5).iloc[-1]) if len(buffer_df) >= 6 else 0.0
-        sma_20 = float(buffer_df["close"].rolling(20, min_periods=5).mean().iloc[-1])
-        is_uptrend = (latest_close >= sma_20 * 0.985) or (price_trend >= -0.01)
-        is_downtrend = (latest_close <= sma_20 * 1.015) or (price_trend <= 0.01)
-
-        def _make_decision(action: str, qty: int, price: float, reason_text: str, conf: float) -> dict[str, Any]:
+            # Still holding
+            pos = self.positions[ticker]
             return {
                 "ticker": ticker,
-                "action": action,
-                "quantity": qty,
-                "price": price,
-                "reason": reason_text,
-                "confidence": conf,
-                "model_prob": price_prob,
+                "action": "HOLD",
+                "quantity": int(pos["shares"]),
+                "price": latest_close,
+                "reason": f"HOLDING LONG (Day {pos.get('days_held', 0)}/{HORIZON_DAYS}, Stop: Rs.{pos.get('stop_price', 0):.2f}, Target: Rs.{pos.get('target_price', 0):.2f}).",
+                "confidence": 0.50,
                 "news_score": news_score,
-                "price_trend": price_trend,
-                "sma_20": sma_20,
-                "is_uptrend": is_uptrend,
-                "features": feat_dict,
             }
 
-        # =================================================================
-        # 1. Active Position Management: Long Exit (SELL) or Short Exit (COVER)
-        # =================================================================
-        if ticker in self.positions:
-            pos = self.positions[ticker]
-            pos_type = pos["type"]
-            entry_price = float(pos.get("entry_price", 0.0))
-            if entry_price <= 0:
-                entry_price = latest_close
-                pos["entry_price"] = entry_price
+        # 2. Check position limit
+        if len(self.positions) >= MAX_CONCURRENT_POSITIONS:
+            return {
+                "ticker": ticker,
+                "action": "HOLD",
+                "quantity": 0,
+                "price": latest_close,
+                "reason": f"Portfolio position cap reached ({len(self.positions)}/{MAX_CONCURRENT_POSITIONS}).",
+                "confidence": 0.50,
+            }
 
-            shares = pos["shares"]
-            days_held = pos.get("days_held", 0) + 1
-            pos["days_held"] = days_held
+        # 3. Requirement 4d: News veto only (score <= -2 blocks entry)
+        if news_score <= -2.0:
+            return {
+                "ticker": ticker,
+                "action": "HOLD",
+                "quantity": 0,
+                "price": latest_close,
+                "reason": f"News veto: adverse news sentiment ({news_score:+.1f} <= -2.0) blocks entry.",
+                "confidence": 0.0,
+            }
 
-            if pos_type == "LONG":
-                peak_price = max(float(pos.get("peak_price", entry_price)), latest_close)
-                pos["peak_price"] = peak_price
-                pnl_pct = (latest_close - entry_price) / entry_price if entry_price > 0 else 0.0
-                trail_drop = (peak_price - latest_close) / peak_price if peak_price > 0 else 0.0
+        # 4. Requirement 4c: Strict Trend Filters (latest_close > sma_20 AND sma_5 > sma_20)
+        sma_5 = float(buffer_df["close"].rolling(5).mean().iloc[-1]) if len(buffer_df) >= 5 else 0.0
+        sma_20 = float(buffer_df["close"].rolling(20).mean().iloc[-1])
+        if not (latest_close > sma_20 and sma_5 > sma_20):
+            return {
+                "ticker": ticker,
+                "action": "HOLD",
+                "quantity": 0,
+                "price": latest_close,
+                "reason": f"Trend filter failed: Requires Close ({latest_close:.2f}) > 20-SMA ({sma_20:.2f}) AND 5-SMA ({sma_5:.2f}) > 20-SMA.",
+                "confidence": 0.0,
+            }
 
-                # 1. Adverse News Catalyst Protection: exit immediately if severe negative news breaks
-                if news_score <= -2:
-                    return _make_decision(
-                        "SELL", shares, latest_close,
-                        f"LONG ADVERSE NEWS CATALYST (Score: {news_score:+.1f}). Exiting before drop worsens.", 0.95
-                    )
+        # 5. Requirement 4f: Model inference with exception logging
+        if self.model is None or not self.feature_cols:
+            return {
+                "ticker": ticker,
+                "action": "HOLD",
+                "quantity": 0,
+                "price": latest_close,
+                "reason": "Model or feature list not loaded.",
+                "confidence": 0.0,
+            }
 
-                # 2. Strict Stop-Loss: Cut immediately if drops past STOP_LOSS_PCT
-                if pnl_pct <= -STOP_LOSS_PCT:
-                    return _make_decision(
-                        "SELL", shares, latest_close,
-                        f"LONG STOP-LOSS ({pnl_pct:.2%} <= -{STOP_LOSS_PCT:.1%}). Realizing defense exit.", 1.0
-                    )
+        try:
+            feat_row = compute_features_live(
+                buffer_df,
+                feature_cols=self.feature_cols,
+                market_df=market_df,
+            )
+            if hasattr(self.model, "predict_proba"):
+                price_prob = float(self.model.predict_proba(feat_row)[0, 1])
+            else:
+                price_prob = float(self.model.predict(feat_row)[0])
+        except Exception as err:
+            self.inference_exception_count += 1
+            print(f"[strategy] Inference Exception #{self.inference_exception_count} for {ticker}: {err}")
+            return {
+                "ticker": ticker,
+                "action": "HOLD",
+                "quantity": 0,
+                "price": latest_close,
+                "reason": f"Model inference exception #{self.inference_exception_count}: {err}",
+                "confidence": 0.0,
+            }
 
-                peak_pnl = (peak_price - entry_price) / entry_price if entry_price > 0 else 0.0
+        # Check threshold
+        if price_prob < self.buy_threshold:
+            return {
+                "ticker": ticker,
+                "action": "HOLD",
+                "quantity": 0,
+                "price": latest_close,
+                "reason": f"Model probability ({price_prob:.4f}) below buy threshold ({self.buy_threshold:.4f}).",
+                "confidence": price_prob,
+                "model_prob": price_prob,
+            }
 
-                # 3. Tiered Ratchet Profit Locks (10% / 14% / 18%):
-                # Tier 3 (Target Reached >= 18%): Lock in profit if price pulls back >= 4% from peak
-                if peak_pnl >= 0.18 and trail_drop >= 0.04:
-                    return _make_decision(
-                        "SELL", shares, latest_close,
-                        f"TIER 3 TARGET LOCK (Booked +{pnl_pct:.2%} profit from peak +{peak_pnl:.2%}).", 0.95
-                    )
+        # Compute ATR for barriers
+        try:
+            atr_pct = self.get_atr_pct(buffer_df)
+        except Exception as err:
+            self.inference_exception_count += 1
+            print(f"[strategy] ATR Exception for {ticker}: {err}")
+            return {
+                "ticker": ticker,
+                "action": "HOLD",
+                "quantity": 0,
+                "price": latest_close,
+                "reason": f"ATR computation error: {err}",
+                "confidence": 0.0,
+            }
 
-                # Tier 2 (Peak Reached >= 14%): Lock in profit if price drops back to <= +11%
-                if peak_pnl >= 0.14 and pnl_pct <= 0.11:
-                    return _make_decision(
-                        "SELL", shares, latest_close,
-                        f"TIER 2 PROFIT LOCK (Protected +{pnl_pct:.2%} profit from peak +{peak_pnl:.2%}).", 0.95
-                    )
+        stop_price = round(latest_close * (1.0 - BARRIER_DOWN_ATR * atr_pct), 2)
+        target_price = round(latest_close * (1.0 + BARRIER_UP_ATR * atr_pct), 2)
 
-                # Tier 1 (Peak Reached >= 10%): Never let a +10% winner turn into a loss! Lock at +7%
-                if peak_pnl >= 0.10 and pnl_pct <= 0.07:
-                    return _make_decision(
-                        "SELL", shares, latest_close,
-                        f"TIER 1 PROFIT LOCK (Protected +{pnl_pct:.2%} profit from peak +{peak_pnl:.2%}).", 0.95
-                    )
-
-                # 4. Dynamic Trailing Stop: Let runners past 20%+ run indefinitely
-                if pnl_pct >= 0.20 and trail_drop >= TRAILING_STOP_PCT:
-                    return _make_decision(
-                        "SELL", shares, latest_close,
-                        f"LONG TRAILING STOP (-{trail_drop:.2%} from peak Rs.{peak_price:.2f}, locking in +{pnl_pct:.2%}).", 0.95
-                    )
-
-                # 4. Trend Exhaustion Exit: Lock in gains if price breaks decisively below 20-day SMA
-                if pnl_pct >= 0.06 and latest_close < sma_20 * 0.98 and trail_drop >= 0.05:
-                    return _make_decision(
-                        "SELL", shares, latest_close,
-                        f"LONG TREND EXHAUSTION (Price Rs.{latest_close:.2f} broke below 20-SMA Rs.{sma_20:.2f}, locking in +{pnl_pct:.2%}).", 0.90
-                    )
-
-            elif pos_type == "SHORT":
-                # For short: profit when price drops, loss when price rises
-                short_pnl_pct = (entry_price - latest_close) / entry_price if entry_price > 0 else 0.0
-
-                # Adverse News Catalyst Protection: cover immediately if strong positive news breaks
-                if news_score >= 2:
-                    return _make_decision(
-                        "COVER", shares, latest_close,
-                        f"SHORT ADVERSE NEWS CATALYST (Score: {news_score:+.1f}). Covering before squeeze worsens.", 0.95
-                    )
-
-                # Short Stop-Loss: Cut if price rises past stop loss
-                if short_pnl_pct <= -STOP_LOSS_PCT:
-                    return _make_decision(
-                        "COVER", shares, latest_close,
-                        f"SHORT STOP-LOSS ({short_pnl_pct:.2%} <= -{STOP_LOSS_PCT:.1%}). Covering borrowed shares.", 1.0
-                    )
-
-                # Short Take-Profit on price drop
-                if short_pnl_pct >= 0.10:
-                    return _make_decision(
-                        "COVER", shares, latest_close,
-                        f"SHORT TAKE-PROFIT (+{short_pnl_pct:.2%}). Locking in gains on price drop.", 0.95
-                    )
-
-                # Mandatory Settlement Rule: Cover before 10-day auto square-off
-                if days_held >= MAX_SHORT_HOLD_DAYS:
-                    return _make_decision(
-                        "COVER", shares, latest_close,
-                        f"SHORT Settlement limit reached ({days_held} days, PnL {short_pnl_pct:+.2%}).", 0.85
-                    )
-
-        # =================================================================
-        # 2. Combined Signals
-        # =================================================================
-        signal_output = combined_signal(
-            price_prob=price_prob,
-            news_score=news_score,
-            price_trend=price_trend,
-            buy_threshold=PRED_BUY_THRESHOLD,
-            sell_threshold=PRED_SELL_THRESHOLD,
+        # Requirement 4e: Single Risk Parity Sizing Path
+        shares = self.calculate_risk_shares(
+            equity=equity,
+            entry=latest_close,
+            stop_price=stop_price,
+            available_cash=current_cash,
         )
 
-        signal = signal_output["signal"]
-        confidence = signal_output["confidence"]
-        reason = signal_output["reason"]
+        if shares < MIN_TRADE_SIZE:
+            return {
+                "ticker": ticker,
+                "action": "HOLD",
+                "quantity": 0,
+                "price": latest_close,
+                "reason": "Calculated risk share size is below minimum trade size.",
+                "confidence": price_prob,
+            }
 
-        # =================================================================
-        # 3. New Entry Execution (Momentum Concentrated Sizing)
-        # =================================================================
-        # Check portfolio diversification limits (max positions)
-        if len(self.positions) >= MAX_CONCURRENT_POSITIONS:
-            return _make_decision(
-                "HOLD", 0, latest_close,
-                f"Concentration cap reached ({len(self.positions)}/{MAX_CONCURRENT_POSITIONS} active).",
-                confidence
-            )
+        # Register position internally
+        self.positions[ticker] = {
+            "type": "LONG",
+            "shares": shares,
+            "entry_price": latest_close,
+            "atr_pct_at_entry": atr_pct,
+            "stop_price": stop_price,
+            "target_price": target_price,
+            "peak_price": latest_close,
+            "days_held": 0,
+            "last_evaluated_date": current_date,
+            "trailing_stop_active": False,
+            "news_score_entry": float(news_score),
+        }
 
-        # High cash deployment: Reserving only minimal cash cushion (97% utilization)
-        investable_cash = current_cash * (1.0 - CASH_RESERVE_PCT)
-        open_slots = max(1, MAX_CONCURRENT_POSITIONS - len(self.positions))
-        trade_budget = min(investable_cash / open_slots, 380000.0)
+        print(
+            f"[strategy] EXECUTED BUY for {ticker}: {shares} shares @ Rs.{latest_close:.2f} | "
+            f"score: {price_prob:.4f} | news_score: {news_score:+.1f}"
+        )
 
-        # 1. Volatility-Adjusted Sizing (Inverse Volatility Risk Parity):
-        # Slightly scale up steady trenders, trim wild high-volatility names
-        stock_vol = float(feat_dict.get("volatility_20", 0.020))
-        if stock_vol > 0.005:
-            vol_ratio = 0.020 / stock_vol
-            vol_mult = max(0.85, min(1.20, vol_ratio))
-            trade_budget = min(trade_budget * vol_mult, investable_cash)
-
-        # 2. Asymmetric News Multiplier: boost size by 20% on strong positive catalyst
-        if news_score >= 2:
-            trade_budget = min(trade_budget * 1.20, investable_cash)
-
-        # ENTRY 1: BUY (Go Long) with Trend & Relative Strength Confirmation
-        if signal == "BUY" and ticker not in self.positions:
-            rel_strength = (latest_close - sma_20) / (sma_20 + 1e-8)
-            if not is_uptrend and news_score < 2:
-                return _make_decision(
-                    "HOLD", 0, latest_close,
-                    f"Model bullish but filtered: Close ({latest_close:.2f}) < 20-day SMA ({sma_20:.2f}). Awaiting trend confirmation.",
-                    confidence
-                )
-            if price_trend < -0.01 and news_score < 2:
-                return _make_decision(
-                    "HOLD", 0, latest_close,
-                    f"Model bullish but filtered: 5-day trend ({price_trend:.2%}) is negative. Awaiting momentum reversal.",
-                    confidence
-                )
-            if rel_strength < -0.035 and news_score < 2:
-                return _make_decision(
-                    "HOLD", 0, latest_close,
-                    f"Model bullish but filtered: Relative strength ({rel_strength:.2%}) is lagging benchmark. Awaiting rebound.",
-                    confidence
-                )
-
-            shares = self.calculate_batch_shares(trade_budget, latest_close)
-            if shares >= MIN_TRADE_SIZE and (shares * latest_close + BROKERAGE_FEE) <= current_cash:
-                return _make_decision("BUY", shares, latest_close, f"BUY LONG: {reason}", confidence)
-
-        # ENTRY 2: SHORT - Strictly gated to prevent bull market whipsaws
-        # Only allowed if ENABLE_SHORT_SELLING is explicitly True OR catastrophic news flash (<= -2)
-        elif signal in ["SELL", "SHORT"] and ticker not in self.positions:
-            if not ENABLE_SHORT_SELLING and news_score > -2:
-                return _make_decision(
-                    "HOLD", 0, latest_close,
-                    f"Short selling gated in secular bull market (news score {news_score:+.1f} > -2.0). Holding long-only discipline.",
-                    confidence
-                )
-
-            if not is_downtrend and news_score > -2:
-                return _make_decision(
-                    "HOLD", 0, latest_close,
-                    f"Model bearish but filtered: Close ({latest_close:.2f}) > 20-day SMA ({sma_20:.2f}). Awaiting downtrend confirmation.",
-                    confidence
-                )
-
-            shares = self.calculate_batch_shares(trade_budget, latest_close)
-            if shares >= MIN_TRADE_SIZE and (shares * latest_close + BROKERAGE_FEE) <= current_cash:
-                return _make_decision("SHORT", shares, latest_close, f"OPEN SHORT: {reason}", confidence)
-
-        return _make_decision("HOLD", 0, latest_close, reason, confidence)
+        return {
+            "ticker": ticker,
+            "action": "BUY",
+            "quantity": shares,
+            "price": latest_close,
+            "reason": (
+                f"BUY LONG: Model score {price_prob:.4f} >= {self.buy_threshold:.4f} | "
+                f"Close Rs.{latest_close:.2f} > 20-SMA Rs.{sma_20:.2f} & 5-SMA > 20-SMA | "
+                f"Stop: Rs.{stop_price:.2f}, Target: Rs.{target_price:.2f}"
+            ),
+            "confidence": round(price_prob, 4),
+            "model_prob": price_prob,
+            "news_score": float(news_score),
+            "stop_price": stop_price,
+            "target_price": target_price,
+            "atr_pct": atr_pct,
+        }
