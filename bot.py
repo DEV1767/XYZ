@@ -236,6 +236,8 @@ class TradingBot:
                 sim_date=sim_date,
                 reason=reason,
             )
+        else:
+            print(f"[TICK] {sim_date} | {ticker:10s} Close={close_price:7.2f} | Action: {action} ({reason[:55]}...)")
 
     def on_news_received(self, payload: dict[str, Any]) -> None:
         """

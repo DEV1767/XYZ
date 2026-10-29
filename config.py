@@ -111,9 +111,9 @@ VAL_RATIO: float = 0.15
 TEST_RATIO: float = 0.15
 RANDOM_STATE: int = 42
 
-# Decision thresholds for classification
-PRED_BUY_THRESHOLD: float = 0.55
-PRED_SELL_THRESHOLD: float = 0.45
+# Decision thresholds for classification (tuned for responsive sandbox & live execution)
+PRED_BUY_THRESHOLD: float = safe_float(os.getenv("PRED_BUY_THRESHOLD"), 0.52)
+PRED_SELL_THRESHOLD: float = safe_float(os.getenv("PRED_SELL_THRESHOLD"), 0.48)
 
 # =====================================================================
 # News Sentiment Keywords & Negations
