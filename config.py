@@ -58,6 +58,7 @@ AUTH_HEADERS: dict[str, str] = {
 STOCKS_API_URL: str = f"{BASE_URL}/api/v1/stocks"
 HISTORY_API_URL_TEMPLATE: str = f"{BASE_URL}/api/v1/stocks/{{ticker}}/history"
 STAGE_API_URL: str = f"{BASE_URL}/api/v1/stage"
+SIMULATION_CLOCK_URL: str = f"{BASE_URL}/api/v1/simulation/clock"
 HEARTBEAT_API_URL: str = f"{BASE_URL}/api/v1/bot/heartbeat"
 PORTFOLIO_API_URL: str = f"{BASE_URL}/api/v1/portfolio"
 PORTFOLIO_CASH_URL: str = f"{BASE_URL}/api/v1/portfolio/cash"
@@ -103,18 +104,23 @@ LTCG_RATE: float = 0.10                                                  # 10% L
 LTCG_EXEMPTION: float = 100000.0                                         # First Rs. 1,00,000 exempt under Sec 112A
 
 # Risk Controls & Portfolio Sizing
-TAKE_PROFIT_PCT: float = safe_float(os.getenv("TAKE_PROFIT_PCT"), 0.04)  # 4% take-profit target
-STOP_LOSS_PCT: float = safe_float(os.getenv("STOP_LOSS_PCT"), 0.025)     # 2.5% strict stop loss (Reward:Risk = 1.6:1)
+TAKE_PROFIT_PCT: float = safe_float(os.getenv("TAKE_PROFIT_PCT"), 0.35)  # Let trends run up to 35%+ (managed via trailing stop)
+STOP_LOSS_PCT: float = safe_float(os.getenv("STOP_LOSS_PCT"), 0.045)     # 4.5% strict stop loss (defends against whipsaws)
+TRAILING_STOP_PCT: float = safe_float(os.getenv("TRAILING_STOP_PCT"), 0.08) # 8% trailing stop from peak once in profit
 MIN_TRADE_SIZE: int = safe_int(os.getenv("MIN_TRADE_SIZE"), 1)           # Minimum shares
-CASH_RESERVE_PCT: float = safe_float(os.getenv("CASH_RESERVE_PCT"), 0.15) # Retain 15% cash reserve
+CASH_RESERVE_PCT: float = safe_float(os.getenv("CASH_RESERVE_PCT"), 0.03) # Deploy 97% capital (matches Rank 1's 98.4% utilization)
 INITIAL_CAPITAL: float = 1000000.0                                       # Rs. 10,00,000 (Ten Lakhs INR)
 MAX_SHORT_HOLD_DAYS: int = 9                                             # Bi-weekly squareoff is on Day 10
 ORDER_TIMEOUT_SEC: float = 5.0                                           # Resilient HTTP order timeout
 
+# Portfolio Concentration Limits (Matches Rank 1's 3-Position Champion Model)
+MAX_CONCURRENT_POSITIONS: int = safe_int(os.getenv("MAX_CONCURRENT_POSITIONS"), 4)
+TARGET_ALLOCATION_PCT: float = safe_float(os.getenv("TARGET_ALLOCATION_PCT"), 0.25)
+
 # =====================================================================
 # Machine Learning Target & Splits
 # =====================================================================
-TARGET_FORWARD_DAYS: int = safe_int(os.getenv("TARGET_FORWARD_DAYS"), 3)
+TARGET_FORWARD_DAYS: int = safe_int(os.getenv("TARGET_FORWARD_DAYS"), 15)  # Extended swing horizon (replaces 3d churn)
 TARGET_PROFIT_THRESHOLD: float = safe_float(os.getenv("TARGET_PROFIT_THRESHOLD"), 0.015) # 1.5% profit target
 
 # Time-based splitting (No shuffling allowed!)
@@ -123,9 +129,10 @@ VAL_RATIO: float = 0.15
 TEST_RATIO: float = 0.15
 RANDOM_STATE: int = 42
 
-# Decision thresholds for classification (tuned for responsive sandbox & live execution)
-PRED_BUY_THRESHOLD: float = safe_float(os.getenv("PRED_BUY_THRESHOLD"), 0.52)
-PRED_SELL_THRESHOLD: float = safe_float(os.getenv("PRED_SELL_THRESHOLD"), 0.48)
+# Decision thresholds for classification (calibrated from simulation logs to maximize win rate)
+PRED_BUY_THRESHOLD: float = safe_float(os.getenv("PRED_BUY_THRESHOLD"), 0.51)  # Calibrated: catches PLNX(0.683) while correctly filtering HMDP(0.403)/ORCX(0.461)/DSNY(0.431)
+PRED_SELL_THRESHOLD: float = safe_float(os.getenv("PRED_SELL_THRESHOLD"), 0.35)
+ENABLE_SHORT_SELLING: bool = os.getenv("ENABLE_SHORT_SELLING", "False").lower() in ("true", "1", "yes")
 
 # =====================================================================
 # News Sentiment Keywords & Negations

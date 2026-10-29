@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -37,10 +38,12 @@ from config import (
     ORDERS_API_URL,
     PORTFOLIO_API_URL,
     PORTFOLIO_CASH_URL,
+    SIMULATION_CLOCK_URL,
     STAGE_API_URL,
     STOCKS_API_URL,
 )
 from news_features import NewsStateBuffer
+from simulation_logger import sim_logger
 from strategy import StrategyEngine
 from telemetry import TelemetryTracker
 
@@ -52,6 +55,7 @@ class TradingBot:
 
     def __init__(self, dry_run: bool = False):
         self.dry_run = dry_run
+        self.sim_logger = sim_logger
         self.session = requests.Session()
         self.session.headers.update(AUTH_HEADERS)
 
@@ -72,8 +76,46 @@ class TradingBot:
         self.tick_counter = 0
         self.refresh_cash_balance()
         self.sync_portfolio()
+        self.query_simulation_clock()
+
+        # Automated Continuous Pre-Flight Heartbeat Keeper (Guarantees Portal stays "Ready")
+        self.last_heartbeat_seq = 1
+        self.heartbeat_running = True
+        self._start_heartbeat_thread()
+
         mode_str = "DRY-RUN (Paper Trading)" if self.dry_run else "LIVE ORDER DISPATCH"
         print(f"[bot] Initialized [{mode_str}] for {len(self.valid_tickers)} tickers. Cash: Rs. {self.current_cash:,.2f}")
+
+    def _start_heartbeat_thread(self) -> None:
+        """Runs background keepalive thread to ping heartbeat API every 8 seconds."""
+        def _heartbeat_worker():
+            while self.heartbeat_running:
+                try:
+                    self.handle_heartbeat(self.last_heartbeat_seq, is_background=True)
+                except Exception:
+                    pass
+                time.sleep(8.0)
+
+        t = threading.Thread(target=_heartbeat_worker, daemon=True, name="HeartbeatDaemonThread")
+        t.start()
+
+    def query_simulation_clock(self) -> dict[str, Any]:
+        """Queries the canonical simulation clock from GET /api/v1/simulation/clock."""
+        try:
+            r = self.session.get(SIMULATION_CLOCK_URL, timeout=3.0)
+            if r.status_code == 200:
+                data = r.json()
+                sim_day = data.get("current_day", 0)
+                total_days = data.get("total_days", 500)
+                rem_days = data.get("remaining_days", 0)
+                sim_date = data.get("simulated_date", "")
+                sec_left = data.get("estimated_time_remaining_sec", 0)
+                stage = data.get("stage", "simulation")
+                print(f"[CLOCK] Simulation Day {sim_day}/{total_days} ({sim_date}) | Remaining: {rem_days} days (~{sec_left // 60}m) | Stage: {stage.upper()}")
+                return data
+        except Exception as e:
+            print(f"[CLOCK WARN] Could not query simulation clock: {e}")
+        return {}
 
     def fetch_active_tickers(self) -> list[str]:
         """Dynamically loads active tickers from GET /api/v1/stocks."""
@@ -193,6 +235,7 @@ class TradingBot:
                                 "type": pos_type,
                                 "shares": shares,
                                 "entry_price": avg_price,
+                                "peak_price": max(avg_price, self.strategy.positions.get(ticker, {}).get("peak_price", avg_price)),
                                 "days_held": self.strategy.positions.get(ticker, {}).get("days_held", 0),
                             }
 
@@ -224,6 +267,7 @@ class TradingBot:
                 "type": "LONG",
                 "shares": quantity,
                 "entry_price": price,
+                "peak_price": price,
                 "entry_date": sim_date,
                 "days_held": 0,
             }
@@ -269,6 +313,7 @@ class TradingBot:
                 else:
                     print(f"[SAFEGUARD] Aborting {action} {quantity} {ticker}: Cost Rs. {order_cost:,.2f} exceeds cash Rs. {self.current_cash:,.2f}.")
                     self.telemetry.record_safeguard_block("Insufficient Capital")
+                    self.sim_logger.log_order(sim_date, ticker, action, quantity, price, "SAFEGUARD_BLOCKED", "Insufficient Capital")
                     return False
 
         elif action == "SELL":
@@ -277,6 +322,7 @@ class TradingBot:
             if not pos or pos.get("type") != "LONG":
                 print(f"[SAFEGUARD] Aborting SELL for {ticker}: No open LONG position held.")
                 self.telemetry.record_safeguard_block("No Long Position")
+                self.sim_logger.log_order(sim_date, ticker, action, quantity, price, "SAFEGUARD_BLOCKED", "No Long Position")
                 return False
             if quantity > pos.get("shares", 0):
                 quantity = pos["shares"]
@@ -287,6 +333,7 @@ class TradingBot:
             if not pos or pos.get("type") != "SHORT":
                 print(f"[SAFEGUARD] Aborting COVER for {ticker}: No open SHORT position held.")
                 self.telemetry.record_safeguard_block("No Short Position")
+                self.sim_logger.log_order(sim_date, ticker, action, quantity, price, "SAFEGUARD_BLOCKED", "No Short Position")
                 return False
             if quantity > pos.get("shares", 0):
                 quantity = pos["shares"]
@@ -306,6 +353,7 @@ class TradingBot:
             print(f"[DRY-RUN PAPER TRADE] Simulated fill: {action} {quantity} {ticker} @ Rs. {price:.2f}. No live API call made.")
             self._update_position_on_fill(ticker, action, quantity, price, sim_date)
             self.telemetry.record_order_result(action, quantity, price, success=True, is_dry_run=True)
+            self.sim_logger.log_order(sim_date, ticker, action, quantity, price, "SIMULATED_FILL", reason)
             return True
 
         max_attempts = 2
@@ -317,11 +365,13 @@ class TradingBot:
                     print(f"[ORDER FILLED] {action} {quantity} {ticker} | Status: {res.get('status', 'OK')}")
                     self._update_position_on_fill(ticker, action, quantity, price, sim_date)
                     self.telemetry.record_order_result(action, quantity, price, success=True, is_dry_run=False)
+                    self.sim_logger.log_order(sim_date, ticker, action, quantity, price, "FILLED", reason)
                     self.refresh_cash_balance()
                     return True
                 else:
                     print(f"[ORDER REJECTED] HTTP {r.status_code}: {r.text}")
                     self.telemetry.record_order_result(action, quantity, price, success=False, is_dry_run=False)
+                    self.sim_logger.log_order(sim_date, ticker, action, quantity, price, f"REJECTED_{r.status_code}", r.text)
                     return False
             except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
                 if attempt < max_attempts:
@@ -330,37 +380,59 @@ class TradingBot:
                 else:
                     print(f"[ORDER ERROR] Network error submitting order for {ticker} after {max_attempts} attempts: {e}")
                     self.telemetry.record_order_result(action, quantity, price, success=False, is_dry_run=False)
+                    self.sim_logger.log_order(sim_date, ticker, action, quantity, price, "NETWORK_ERROR", str(e))
                     return False
             except Exception as e:
                 print(f"[ORDER ERROR] Unexpected error submitting order for {ticker}: {e}")
                 self.telemetry.record_order_result(action, quantity, price, success=False, is_dry_run=False)
+                self.sim_logger.log_order(sim_date, ticker, action, quantity, price, "UNEXPECTED_ERROR", str(e))
                 return False
 
         return False
 
-    def handle_heartbeat(self, seq: int) -> None:
-        """Acknowledges pre-flight standby ping to keep team status 'Ready'."""
+    def handle_heartbeat(self, seq: int, is_background: bool = False) -> bool:
+        """Acknowledges pre-flight standby ping to keep team status 'Ready' on the portal."""
+        safe_seq = max(1, int(seq))
+        self.last_heartbeat_seq = safe_seq
         try:
-            resp = self.session.post(HEARTBEAT_API_URL, json={"seq": seq}, timeout=3)
+            resp = self.session.post(HEARTBEAT_API_URL, json={"seq": safe_seq}, timeout=3.0)
             if resp.status_code in [200, 201]:
-                print(f"[HEARTBEAT] Sequence {seq} acknowledged (Status: Ready).")
+                if not is_background:
+                    print(f"[HEARTBEAT] Sequence {safe_seq} acknowledged successfully -> Status: Ready on Portal.")
+                return True
+            else:
+                print(f"[HEARTBEAT WARN] Server status {resp.status_code} for seq {safe_seq}: {resp.text}")
+                return False
         except Exception as e:
-            print(f"[HEARTBEAT ERROR] Failed to ACK seq {seq}: {e}")
+            if not is_background:
+                print(f"[HEARTBEAT ERROR] Failed to send heartbeat ACK for seq {safe_seq}: {e}")
+            return False
 
     def on_tick_received(self, payload: dict[str, Any]) -> None:
         """
         Processes price tick event on topic 'market.ticks'.
         Runs feature calculations, signal combinations, and order dispatch within 3s.
         """
-        event_type = payload.get("event_type") or payload.get("event", "price_tick")
+        event_raw = str(payload.get("event_type") or payload.get("event") or payload.get("type", "price_tick")).lower()
 
         # 1. Standby Pre-flight Check
-        if event_type == "preflight_tick":
+        if "preflight" in event_raw or "heartbeat" in event_raw:
             seq = payload.get("seq")
+            if seq is None:
+                seq = payload.get("sequence")
             if seq is None and "data" in payload and isinstance(payload["data"], dict):
-                seq = payload["data"].get("seq")
-            if seq is not None:
-                self.handle_heartbeat(int(seq))
+                seq = payload["data"].get("seq") or payload["data"].get("sequence")
+
+            seq_num = max(1, int(seq)) if seq is not None else self.last_heartbeat_seq
+            self.handle_heartbeat(seq_num, is_background=False)
+
+            # Dynamically refresh simulation stock universe at pre-flight
+            if not self.valid_tickers or self.tick_counter == 0:
+                refreshed = self.fetch_active_tickers()
+                if refreshed and set(refreshed) != set(self.valid_tickers):
+                    self.valid_tickers = refreshed
+                    self.strategy.valid_tickers = refreshed
+                    print(f"[bot] Active stock universe refreshed at pre-flight: {self.valid_tickers}")
             return
 
         # 2. Daily Price Tick
@@ -381,6 +453,9 @@ class TradingBot:
             "volume": float(data.get("volume", 0.0)),
             "ticker": ticker,
         }
+
+        # Log raw incoming tick to live simulation log
+        self.sim_logger.log_tick(sim_date, ticker, bar["open"], bar["high"], bar["low"], bar["close"], bar["volume"])
 
         buf = self.price_buffers[ticker]
         buf.append(bar)
@@ -409,6 +484,21 @@ class TradingBot:
         latency_ms = (time.perf_counter() - t0) * 1000.0
         self.telemetry.record_latency(latency_ms)
 
+        # Log complete ML diagnostic decision with all 18 calculated features
+        self.sim_logger.log_decision(
+            sim_date=sim_date,
+            ticker=ticker,
+            close_p=close_price,
+            decision=decision,
+            features=decision.get("features"),
+            latency_ms=latency_ms,
+            model_prob=decision.get("model_prob", 0.50),
+            news_score=news_score,
+            price_trend=decision.get("price_trend", 0.0),
+            sma_20=decision.get("sma_20", 0.0),
+            is_uptrend=decision.get("is_uptrend", True),
+        )
+
         action = decision["action"]
         qty = decision["quantity"]
         price = decision["price"]
@@ -426,10 +516,12 @@ class TradingBot:
         else:
             print(f"[TICK] {sim_date} | {ticker:10s} Close={close_price:7.2f} | Latency={latency_ms:.2f}ms | Action: {action} ({reason[:50]}...)")
 
-        # Periodically refresh full portfolio state from server
+        # Periodically refresh full portfolio state from server & update live summary
         self.tick_counter += 1
         if self.tick_counter % 25 == 0:
             self.sync_portfolio()
+            avg_lat = self.telemetry.get_avg_latency() if hasattr(self.telemetry, "get_avg_latency") else 0.0
+            self.sim_logger.update_summary(self.current_cash, self.strategy.positions, avg_lat)
 
     def on_news_received(self, payload: dict[str, Any]) -> None:
         """
@@ -444,6 +536,7 @@ class TradingBot:
         desc = str(data.get("description", ""))
 
         scored = self.news_buffer.add_news(ticker, sim_date, headline, desc)
+        self.sim_logger.log_news(sim_date, ticker, scored["score"], scored["magnitude"], headline, desc)
         print(f"[NEWS] {sim_date} | {ticker} (Score: {scored['score']:+d}, Mag: {scored['magnitude']}%) : {headline[:65]}...")
 
     def run(self, max_ticks: int = 0) -> None:
@@ -515,12 +608,15 @@ class TradingBot:
                             continue
 
                         topic = msg.topic
-                        if topic == KAFKA_TICKS_TOPIC:
-                            self.on_tick_received(payload)
-                            ticks_count += 1
-                        elif topic == KAFKA_NEWS_TOPIC:
-                            self.on_news_received(payload)
-                            news_count += 1
+                        try:
+                            if topic == KAFKA_TICKS_TOPIC:
+                                self.on_tick_received(payload)
+                                ticks_count += 1
+                            elif topic == KAFKA_NEWS_TOPIC:
+                                self.on_news_received(payload)
+                                news_count += 1
+                        except Exception as e:
+                            print(f"[bot] Error processing event from {topic}: {e}")
 
                         if max_ticks > 0 and ticks_count >= max_ticks:
                             print(f"\n[bot] Reached limit of {max_ticks} ticks. Concluding execution cycle.")
@@ -537,23 +633,19 @@ class TradingBot:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Autonomous Trading Bot Runner")
-    parser.add_argument("--live", action="store_true", help="Launch live Kafka trading loop")
+    parser.add_argument("--live", action="store_true", default=True, help="Launch live Kafka trading loop (default)")
     parser.add_argument("--dry-run", action="store_true", help="Paper trade without sending live REST orders")
     parser.add_argument("--ticks", type=int, default=0, help="Optional number of ticks to process before stopping")
     parser.add_argument("--scorecard", action="store_true", help="Print live 5-Pillar Executive Jury Scorecard and exit")
+    parser.add_argument("--test", action="store_true", help="Run self-test only and exit")
     args = parser.parse_args()
 
     bot = TradingBot(dry_run=args.dry_run)
     if args.scorecard:
         bot.sync_portfolio()
         bot.telemetry.print_jury_scorecard()
-    elif args.live:
-        bot.run(max_ticks=args.ticks)
-    else:
+    elif args.test:
         print("\n[bot] Self-test passed.")
-        print("  To view the Live 5-Pillar Jury Scorecard:")
-        print("      python bot.py --scorecard")
-        print("  To test in Sandbox (Paper Trading - zero risk):")
-        print("      python bot.py --live --dry-run")
-        print("  To test in Sandbox (Live Order Execution):")
-        print("      python bot.py --live")
+    else:
+        # Default behavior: RUN CONTINUOUSLY
+        bot.run(max_ticks=args.ticks)

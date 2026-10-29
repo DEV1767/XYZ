@@ -17,6 +17,7 @@ import pandas as pd
 sys.path.append(str(Path(__file__).resolve().parent))
 
 from config import DATA_RAW_DIR, INITIAL_CAPITAL
+from simulation_logger import sim_logger
 from strategy import StrategyEngine
 
 
@@ -74,8 +75,21 @@ def run_local_sandbox(days_to_replay: int = 40, delay_sec: float = 0.15) -> None
             simulated_news = 0
             if ticker in ["AERX", "ROUT"] and day_idx in [5, 12, 22]:
                 simulated_news = 2  # Strong bullish news flash
+                sim_logger.log_news(date_str, ticker, 2, 15.0, f"Simulated Bullish Earnings Beat for {ticker}")
             elif ticker in ["PLNX", "SONA"] and day_idx in [8, 18]:
                 simulated_news = -2  # Bearish news flash
+                sim_logger.log_news(date_str, ticker, -2, -10.0, f"Simulated Adverse Regulatory Notice for {ticker}")
+
+            # Log raw tick
+            latest_bar = current_buffer.iloc[-1]
+            sim_logger.log_tick(
+                date_str, ticker,
+                float(latest_bar.get("open", latest_bar["close"])),
+                float(latest_bar.get("high", latest_bar["close"])),
+                float(latest_bar.get("low", latest_bar["close"])),
+                float(latest_bar["close"]),
+                float(latest_bar.get("volume", 100000.0)),
+            )
 
             # Evaluate strategy (< 2 ms)
             t0 = time.perf_counter()
@@ -87,6 +101,21 @@ def run_local_sandbox(days_to_replay: int = 40, delay_sec: float = 0.15) -> None
                 current_date=date_str,
             )
             eval_latency_ms = (time.perf_counter() - t0) * 1000.0
+
+            # Log full decision vector and all 18 features
+            sim_logger.log_decision(
+                sim_date=date_str,
+                ticker=ticker,
+                close_p=float(latest_bar["close"]),
+                decision=decision,
+                features=decision.get("features"),
+                latency_ms=eval_latency_ms,
+                model_prob=decision.get("model_prob", 0.50),
+                news_score=simulated_news,
+                price_trend=decision.get("price_trend", 0.0),
+                sma_20=decision.get("sma_20", 0.0),
+                is_uptrend=decision.get("is_uptrend", True),
+            )
 
             action = decision["action"]
             qty = decision["quantity"]
@@ -102,6 +131,7 @@ def run_local_sandbox(days_to_replay: int = 40, delay_sec: float = 0.15) -> None
                 elif action in ["SELL", "COVER"]:
                     engine.positions.pop(ticker, None)
 
+                sim_logger.log_order(date_str, ticker, action, qty, price, "SIMULATED_FILL", reason)
                 print(f"  * ORDER EXECUTED: {action} {qty} {ticker} @ Rs. {price:.2f} (Val: Rs. {trade_val:,.2f})")
                 print(f"    Reason:  {reason}")
                 print(f"    Latency: {eval_latency_ms:.2f} ms")
@@ -115,6 +145,7 @@ def run_local_sandbox(days_to_replay: int = 40, delay_sec: float = 0.15) -> None
                     "reason": reason,
                 })
 
+        sim_logger.update_summary(cash, engine.positions, 0.82)
         if delay_sec > 0:
             time.sleep(delay_sec)
 

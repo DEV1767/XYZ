@@ -111,6 +111,18 @@ class TelemetryTracker:
         if len(self.latencies_ms) > 1000:
             self.latencies_ms.pop(0)
 
+    def get_avg_latency(self) -> float:
+        """Returns running average decision latency in milliseconds."""
+        return sum(self.latencies_ms) / max(len(self.latencies_ms), 1)
+
+    def get_error_rate(self) -> float:
+        """Returns order rejection error rate percentage."""
+        return (self.rejected_orders / max(self.total_orders, 1)) * 100.0
+
+    def get_cash_utilization(self) -> float:
+        """Returns current cash utilization percentage."""
+        return self.cash_utilization_pct
+
     def record_safeguard_block(self, reason: str = "") -> None:
         """Tracks when a client safeguard stopped a bad order from hitting server rejection."""
         self.safeguard_interventions += 1

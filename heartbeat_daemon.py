@@ -53,7 +53,7 @@ def run_heartbeat_daemon() -> None:
     print("=" * 65 + "\n")
 
     # Initial ping
-    send_heartbeat_ack(session, seq=0)
+    send_heartbeat_ack(session, seq=1)
 
     try:
         from kafka import KafkaConsumer
@@ -72,7 +72,7 @@ def run_heartbeat_daemon() -> None:
         print("[daemon] Connected to Kafka ticks stream. Listening for pre-flight sequence pings...")
 
         last_ack_time = time.time()
-        last_seq = 0
+        last_seq = 1
 
         while True:
             records = consumer.poll(timeout_ms=1000)
@@ -90,22 +90,22 @@ def run_heartbeat_daemon() -> None:
                             if seq is None and "data" in payload and isinstance(payload["data"], dict):
                                 seq = payload["data"].get("seq")
                             if seq is not None:
-                                last_seq = int(seq)
+                                last_seq = max(1, int(seq))
                                 send_heartbeat_ack(session, last_seq)
                                 last_ack_time = now
 
-            # Ensure we send an ACK at least once every 12 seconds even during standby idle
-            if now - last_ack_time >= 12.0:
+            # Ensure we send an ACK at least once every 8 seconds even during standby idle
+            if now - last_ack_time >= 8.0:
                 send_heartbeat_ack(session, last_seq)
                 last_ack_time = now
 
     except Exception as exc:
-        print(f"[daemon] Kafka listener note ({exc}). Falling back to 10s HTTP keepalive timer...")
-        seq = 0
+        print(f"[daemon] Kafka listener note ({exc}). Falling back to 8s HTTP keepalive timer...")
+        seq = 1
         while True:
             send_heartbeat_ack(session, seq)
             seq += 1
-            time.sleep(10)
+            time.sleep(8)
 
 
 if __name__ == "__main__":
