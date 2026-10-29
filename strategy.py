@@ -43,8 +43,6 @@ from config import (
     PRED_BUY_THRESHOLD,
     PRED_SELL_THRESHOLD,
     STOP_LOSS_PCT,
-    TAKE_PROFIT_PCT,
-    TARGET_ALLOCATION_PCT,
     TARGET_FORWARD_DAYS,
     TRAILING_STOP_PCT,
 )
@@ -212,9 +210,32 @@ class StrategyEngine:
                         f"LONG STOP-LOSS ({pnl_pct:.2%} <= -{STOP_LOSS_PCT:.1%}). Realizing defense exit.", 1.0
                     )
 
-                # 3. Dynamic Trailing Stop: Let winners run indefinitely (to +30%, +60%, +100%+)
-                # Once in solid profit (>=12%), exit only if it falls 8% from highest recorded peak
-                if pnl_pct >= 0.12 and trail_drop >= TRAILING_STOP_PCT:
+                peak_pnl = (peak_price - entry_price) / entry_price if entry_price > 0 else 0.0
+
+                # 3. Tiered Ratchet Profit Locks (10% / 14% / 18%):
+                # Tier 3 (Target Reached >= 18%): Lock in profit if price pulls back >= 4% from peak
+                if peak_pnl >= 0.18 and trail_drop >= 0.04:
+                    return _make_decision(
+                        "SELL", shares, latest_close,
+                        f"TIER 3 TARGET LOCK (Booked +{pnl_pct:.2%} profit from peak +{peak_pnl:.2%}).", 0.95
+                    )
+
+                # Tier 2 (Peak Reached >= 14%): Lock in profit if price drops back to <= +11%
+                if peak_pnl >= 0.14 and pnl_pct <= 0.11:
+                    return _make_decision(
+                        "SELL", shares, latest_close,
+                        f"TIER 2 PROFIT LOCK (Protected +{pnl_pct:.2%} profit from peak +{peak_pnl:.2%}).", 0.95
+                    )
+
+                # Tier 1 (Peak Reached >= 10%): Never let a +10% winner turn into a loss! Lock at +7%
+                if peak_pnl >= 0.10 and pnl_pct <= 0.07:
+                    return _make_decision(
+                        "SELL", shares, latest_close,
+                        f"TIER 1 PROFIT LOCK (Protected +{pnl_pct:.2%} profit from peak +{peak_pnl:.2%}).", 0.95
+                    )
+
+                # 4. Dynamic Trailing Stop: Let runners past 20%+ run indefinitely
+                if pnl_pct >= 0.20 and trail_drop >= TRAILING_STOP_PCT:
                     return _make_decision(
                         "SELL", shares, latest_close,
                         f"LONG TRAILING STOP (-{trail_drop:.2%} from peak Rs.{peak_price:.2f}, locking in +{pnl_pct:.2%}).", 0.95
@@ -290,16 +311,37 @@ class StrategyEngine:
         open_slots = max(1, MAX_CONCURRENT_POSITIONS - len(self.positions))
         trade_budget = min(investable_cash / open_slots, 380000.0)
 
-        # Asymmetric News Multiplier: boost size by 20% on strong positive catalyst
+        # 1. Volatility-Adjusted Sizing (Inverse Volatility Risk Parity):
+        # Slightly scale up steady trenders, trim wild high-volatility names
+        stock_vol = float(feat_dict.get("volatility_20", 0.020))
+        if stock_vol > 0.005:
+            vol_ratio = 0.020 / stock_vol
+            vol_mult = max(0.85, min(1.20, vol_ratio))
+            trade_budget = min(trade_budget * vol_mult, investable_cash)
+
+        # 2. Asymmetric News Multiplier: boost size by 20% on strong positive catalyst
         if news_score >= 2:
             trade_budget = min(trade_budget * 1.20, investable_cash)
 
-        # ENTRY 1: BUY (Go Long) with Trend Confirmation
+        # ENTRY 1: BUY (Go Long) with Trend & Relative Strength Confirmation
         if signal == "BUY" and ticker not in self.positions:
+            rel_strength = (latest_close - sma_20) / (sma_20 + 1e-8)
             if not is_uptrend and news_score < 2:
                 return _make_decision(
                     "HOLD", 0, latest_close,
                     f"Model bullish but filtered: Close ({latest_close:.2f}) < 20-day SMA ({sma_20:.2f}). Awaiting trend confirmation.",
+                    confidence
+                )
+            if price_trend < -0.01 and news_score < 2:
+                return _make_decision(
+                    "HOLD", 0, latest_close,
+                    f"Model bullish but filtered: 5-day trend ({price_trend:.2%}) is negative. Awaiting momentum reversal.",
+                    confidence
+                )
+            if rel_strength < -0.035 and news_score < 2:
+                return _make_decision(
+                    "HOLD", 0, latest_close,
+                    f"Model bullish but filtered: Relative strength ({rel_strength:.2%}) is lagging benchmark. Awaiting rebound.",
                     confidence
                 )
 
