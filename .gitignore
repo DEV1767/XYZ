@@ -1,0 +1,30 @@
+# Virtual environment
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+
+# Environment secrets
+.env
+!.env.example
+
+# Raw Data (large CSV files)
+data/raw/*.csv
+data/raw/*.parquet
+!data/raw/.gitkeep
+
+# Models & Checkpoints
+models/*.joblib
+models/*.pkl
+!models/.gitkeep
+
+# Logs and Plots
+logs/*
+!logs/.gitkeep
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
