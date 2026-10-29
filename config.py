@@ -6,7 +6,9 @@ risk controls, news keywords, and ML hyperparameters.
 
 from __future__ import annotations
 import os
+import re
 from pathlib import Path
+from typing import Any
 from dotenv import load_dotenv
 
 # Load .env file from project root
@@ -14,11 +16,37 @@ BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
 load_dotenv(dotenv_path=ENV_PATH)
 
+
+# =====================================================================
+# Safe Type Parsing Utilities (Prevents crashes from accidental typos)
+# =====================================================================
+def safe_float(val: Any, default: float) -> float:
+    """Extracts a valid float from a string/number even if accidental characters exist."""
+    if val is None:
+        return default
+    try:
+        cleaned = re.sub(r"[^\d.]", "", str(val))
+        return float(cleaned) if cleaned else default
+    except Exception:
+        return default
+
+
+def safe_int(val: Any, default: int) -> int:
+    """Extracts a valid integer from a string/number even if accidental characters exist."""
+    if val is None:
+        return default
+    try:
+        cleaned = re.sub(r"[^\d]", "", str(val))
+        return int(cleaned) if cleaned else default
+    except Exception:
+        return default
+
+
 # =====================================================================
 # Server & API Configuration
 # =====================================================================
-SERVER_IP: str = os.getenv("SERVER_IP", "127.0.0.1")
-API_PORT: int = int(os.getenv("API_PORT", "3002"))
+SERVER_IP: str = os.getenv("SERVER_IP", "192.168.65.157")
+API_PORT: int = safe_int(os.getenv("API_PORT"), 3002)
 BASE_URL: str = f"http://{SERVER_IP}:{API_PORT}"
 BOT_ACCESS_TOKEN: str = os.getenv("BOT_ACCESS_TOKEN", "")
 
@@ -29,6 +57,11 @@ AUTH_HEADERS: dict[str, str] = {
 
 STOCKS_API_URL: str = f"{BASE_URL}/api/v1/stocks"
 HISTORY_API_URL_TEMPLATE: str = f"{BASE_URL}/api/v1/stocks/{{ticker}}/history"
+STAGE_API_URL: str = f"{BASE_URL}/api/v1/stage"
+HEARTBEAT_API_URL: str = f"{BASE_URL}/api/v1/bot/heartbeat"
+PORTFOLIO_API_URL: str = f"{BASE_URL}/api/v1/portfolio"
+PORTFOLIO_CASH_URL: str = f"{BASE_URL}/api/v1/portfolio/cash"
+ORDERS_API_URL: str = f"{BASE_URL}/api/v1/orders"
 
 # =====================================================================
 # Kafka Stream Configuration
@@ -38,13 +71,6 @@ KAFKA_BOOTSTRAP_SERVERS: str = os.getenv("KAFKA_BOOTSTRAP_SERVERS", f"{SERVER_IP
 KAFKA_NEWS_TOPIC: str = os.getenv("KAFKA_NEWS_TOPIC", "market.news")
 KAFKA_TICKS_TOPIC: str = os.getenv("KAFKA_TICKS_TOPIC", "market.ticks")
 KAFKA_GROUP_COLLECTOR: str = f"group-{TEAM_USERNAME}"
-
-# Endpoints as per Problem Statement
-STAGE_API_URL: str = f"{BASE_URL}/api/v1/stage"
-HEARTBEAT_API_URL: str = f"{BASE_URL}/api/v1/bot/heartbeat"
-PORTFOLIO_API_URL: str = f"{BASE_URL}/api/v1/portfolio"
-PORTFOLIO_CASH_URL: str = f"{BASE_URL}/api/v1/portfolio/cash"
-ORDERS_API_URL: str = f"{BASE_URL}/api/v1/orders"
 
 # =====================================================================
 # Directory & File Paths
@@ -70,40 +96,24 @@ NEWS_MODEL_FILE: Path = MODELS_DIR / "news_model.joblib"
 # Trading & Transaction Costs (Manthan 2026 Problem Statement)
 # =====================================================================
 # Platform transaction costs & taxes
-BROKERAGE_FEE: float = float(os.getenv("BROKERAGE_FEE", "20.0"))     # Flat Rs. 20 per order
-DP_CHARGE: float = float(os.getenv("DP_CHARGE", "15.34"))            # Flat Rs. 15.34 on sells
-STCG_RATE: float = 0.15                                              # 15% Short Term Capital Gains (<=365d)
-LTCG_RATE: float = 0.10                                              # 10% Long Term Capital Gains (>365d)
-LTCG_EXEMPTION: float = 100000.0                                     # First Rs. 1,00,000 exempt under Sec 112A
-
-def safe_float(val: Any, default: float) -> float:
-    try:
-        import re
-        cleaned = re.sub(r"[^\d.]", "", str(val))
-        return float(cleaned) if cleaned else default
-    except Exception:
-        return default
-
-def safe_int(val: Any, default: int) -> int:
-    try:
-        import re
-        cleaned = re.sub(r"[^\d]", "", str(val))
-        return int(cleaned) if cleaned else default
-    except Exception:
-        return default
+BROKERAGE_FEE: float = safe_float(os.getenv("BROKERAGE_FEE"), 20.0)      # Flat Rs. 20 per order
+DP_CHARGE: float = safe_float(os.getenv("DP_CHARGE"), 15.34)             # Flat Rs. 15.34 on sells
+STCG_RATE: float = 0.15                                                  # 15% Short Term Capital Gains (<=365d)
+LTCG_RATE: float = 0.10                                                  # 10% Long Term Capital Gains (>365d)
+LTCG_EXEMPTION: float = 100000.0                                         # First Rs. 1,00,000 exempt under Sec 112A
 
 # Risk Controls & Portfolio Sizing
-STOP_LOSS_PCT: float = safe_float(os.getenv("STOP_LOSS_PCT"), 0.03)     # 3% stop loss
-MIN_TRADE_SIZE: int = safe_int(os.getenv("MIN_TRADE_SIZE"), 1)          # Minimum shares
-CASH_RESERVE_PCT: float = safe_float(os.getenv("CASH_RESERVE_PCT"), 0.10)  # Retain 10% cash reserve
-INITIAL_CAPITAL: float = 1000000.0                                   # Rs. 10,00,000 (Ten Lakhs INR)
-MAX_SHORT_HOLD_DAYS: int = 9                                         # Bi-weekly squareoff is on Day 10
+STOP_LOSS_PCT: float = safe_float(os.getenv("STOP_LOSS_PCT"), 0.03)      # 3% stop loss
+MIN_TRADE_SIZE: int = safe_int(os.getenv("MIN_TRADE_SIZE"), 1)           # Minimum shares
+CASH_RESERVE_PCT: float = safe_float(os.getenv("CASH_RESERVE_PCT"), 0.10) # Retain 10% cash reserve
+INITIAL_CAPITAL: float = 1000000.0                                       # Rs. 10,00,000 (Ten Lakhs INR)
+MAX_SHORT_HOLD_DAYS: int = 9                                             # Bi-weekly squareoff is on Day 10
 
 # =====================================================================
 # Machine Learning Target & Splits
 # =====================================================================
-TARGET_FORWARD_DAYS: int = int(os.getenv("TARGET_FORWARD_DAYS", "3"))
-TARGET_PROFIT_THRESHOLD: float = float(os.getenv("TARGET_PROFIT_THRESHOLD", "0.015")) # 1.5% profit target
+TARGET_FORWARD_DAYS: int = safe_int(os.getenv("TARGET_FORWARD_DAYS"), 3)
+TARGET_PROFIT_THRESHOLD: float = safe_float(os.getenv("TARGET_PROFIT_THRESHOLD"), 0.015) # 1.5% profit target
 
 # Time-based splitting (No shuffling allowed!)
 TRAIN_RATIO: float = 0.70
