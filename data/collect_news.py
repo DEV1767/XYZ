@@ -206,6 +206,9 @@ def run_kafka_collector() -> None:
                 group_id=KAFKA_GROUP_COLLECTOR,
                 auto_offset_reset="latest",
                 enable_auto_commit=False,
+                api_version=(2, 8, 0),
+                session_timeout_ms=10000,
+                request_timeout_ms=30000,
                 value_deserializer=lambda m: json.loads(m.decode("utf-8")),
                 consumer_timeout_ms=5000,
             )
