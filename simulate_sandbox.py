@@ -65,8 +65,8 @@ def run_local_sandbox(days_to_replay: int = 40, delay_sec: float = 0.15) -> None
 
         for ticker in tickers:
             df = data_by_ticker[ticker]
-            # Slices up to current simulated date strictly (anti-lookahead)
-            current_buffer = df[df["date"] <= sim_date].tail(50).copy()
+            # Slices up to current simulated date strictly (anti-lookahead, >= 100 bars)
+            current_buffer = df[df["date"] <= sim_date].tail(120).copy()
 
             if len(current_buffer) < 20:
                 continue

@@ -231,7 +231,7 @@ class SimulationEnvironment:
 
             for ticker in self.tickers:
                 df = self.stock_dfs[ticker]
-                buffer_df = df[df["date"] <= sim_date].tail(50).copy()
+                buffer_df = df[df["date"] <= sim_date].tail(120).copy()
                 if len(buffer_df) < 20:
                     continue
 

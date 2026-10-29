@@ -158,6 +158,9 @@ def build_features(
             on="date",
             how="left",
         )
+        # Forward-fill latest market return if new intraday bar date is not yet in market_df
+        data["market_return_5d"] = data["market_return_5d"].ffill().fillna(0.0)
+        data["market_return_20d"] = data["market_return_20d"].ffill().fillna(0.0)
     elif "market_return_5d" not in data.columns:
         data["market_return_5d"] = 0.0
         data["market_return_20d"] = 0.0

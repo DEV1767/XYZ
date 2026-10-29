@@ -69,6 +69,10 @@ class StrategyEngine:
         self.feature_cols: list[str] | None = None
         self.buy_threshold: float = PRED_BUY_THRESHOLD
         self.inference_exception_count: int = 0
+        self.score_history: list[float] = []
+        self.use_trailing_median: bool = True
+        self.use_strict_trend_filter: bool = False
+        self.max_daily_entries: int = 2
 
         # Load metadata if available (to get dynamically chosen threshold from walk-forward validation)
         if metadata_path.exists():
@@ -109,6 +113,13 @@ class StrategyEngine:
     def set_valid_tickers(self, tickers: list[str]) -> None:
         """Updates the active ticker whitelist."""
         self.valid_tickers = set(t.upper() for t in tickers)
+
+    def get_effective_buy_threshold(self) -> float:
+        """Returns the trailing 60-day median score if available, else static buy_threshold."""
+        if self.use_trailing_median and len(self.score_history) >= 20:
+            trailing = self.score_history[-600:]
+            return float(np.median(trailing))
+        return self.buy_threshold
 
     def calculate_risk_shares(
         self,
@@ -343,8 +354,11 @@ class StrategyEngine:
             sma_5 = float(buf["close"].rolling(5).mean().iloc[-1])
             sma_20 = float(buf["close"].rolling(20).mean().iloc[-1])
 
-            # Requirement 4c: Strict Trend Filters (latest_close > sma_20 AND sma_5 > sma_20)
-            if not (latest_close > sma_20 and sma_5 > sma_20):
+            # Trend Filter
+            is_uptrend = (latest_close > sma_20)
+            if self.use_strict_trend_filter:
+                is_uptrend = is_uptrend and (sma_5 > sma_20)
+            if not is_uptrend:
                 continue
 
             # Requirement 4d: News as veto only (score <= -2 blocks entry)
@@ -371,8 +385,10 @@ class StrategyEngine:
                 print(f"[strategy] Inference Exception #{self.inference_exception_count} for {ticker}: {err}")
                 continue
 
-            # Requirement 4c: Subject to minimum score from train.py
-            if score < self.buy_threshold:
+            # Score tracking & dynamic threshold
+            self.score_history.append(score)
+            eff_thresh = self.get_effective_buy_threshold()
+            if score < eff_thresh:
                 continue
 
             try:
@@ -395,9 +411,9 @@ class StrategyEngine:
         if not candidates:
             return decisions
 
-        # Requirement 4c: Rank candidates cross-sectionally by model score descending
+        # Rank candidates cross-sectionally by model score descending (take top-N per day)
         candidates.sort(key=lambda c: c["score"], reverse=True)
-        selected = candidates[:free_slots]
+        selected = candidates[:min(self.max_daily_entries, free_slots)]
 
         # Requirement 4e: Single Risk Parity Sizing Path
         available_cash = current_cash
@@ -548,16 +564,19 @@ class StrategyEngine:
                 "confidence": 0.0,
             }
 
-        # 4. Requirement 4c: Strict Trend Filters (latest_close > sma_20 AND sma_5 > sma_20)
+        # 4. Trend Filter
         sma_5 = float(buffer_df["close"].rolling(5).mean().iloc[-1]) if len(buffer_df) >= 5 else 0.0
         sma_20 = float(buffer_df["close"].rolling(20).mean().iloc[-1])
-        if not (latest_close > sma_20 and sma_5 > sma_20):
+        is_uptrend = (latest_close > sma_20)
+        if self.use_strict_trend_filter:
+            is_uptrend = is_uptrend and (sma_5 > sma_20)
+        if not is_uptrend:
             return {
                 "ticker": ticker,
                 "action": "HOLD",
                 "quantity": 0,
                 "price": latest_close,
-                "reason": f"Trend filter failed: Requires Close ({latest_close:.2f}) > 20-SMA ({sma_20:.2f}) AND 5-SMA ({sma_5:.2f}) > 20-SMA.",
+                "reason": f"Trend filter failed: Requires Close ({latest_close:.2f}) > 20-SMA ({sma_20:.2f})" + (" AND 5-SMA > 20-SMA." if self.use_strict_trend_filter else "."),
                 "confidence": 0.0,
             }
 
@@ -594,14 +613,16 @@ class StrategyEngine:
                 "confidence": 0.0,
             }
 
-        # Check threshold
-        if price_prob < self.buy_threshold:
+        # Check threshold (dynamic trailing median or static)
+        self.score_history.append(price_prob)
+        eff_thresh = self.get_effective_buy_threshold()
+        if price_prob < eff_thresh:
             return {
                 "ticker": ticker,
                 "action": "HOLD",
                 "quantity": 0,
                 "price": latest_close,
-                "reason": f"Model probability ({price_prob:.4f}) below buy threshold ({self.buy_threshold:.4f}).",
+                "reason": f"Model probability ({price_prob:.4f}) below threshold ({eff_thresh:.4f}).",
                 "confidence": price_prob,
                 "model_prob": price_prob,
             }

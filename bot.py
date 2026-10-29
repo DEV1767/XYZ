@@ -46,6 +46,7 @@ from news_features import NewsStateBuffer
 from simulation_logger import sim_logger
 from strategy import StrategyEngine
 from telemetry import TelemetryTracker
+from features import compute_market_returns
 
 
 class TradingBot:
@@ -142,6 +143,7 @@ class TradingBot:
         """Loads historical daily bars so indicator buffers are primed from Day 1."""
         print("[bot] Warm-starting indicator buffers from historical data...")
         count = 0
+        raw_dfs = {}
         for ticker in self.valid_tickers:
             csv_path = DATA_RAW_DIR / f"{ticker}.csv"
             if csv_path.exists():
@@ -150,13 +152,20 @@ class TradingBot:
                     df.columns = [c.lower().strip() for c in df.columns]
                     df["date"] = pd.to_datetime(df["date"])
                     df = df.sort_values("date").reset_index(drop=True)
+                    raw_dfs[ticker] = df
 
-                    # Keep last 50 bars
-                    recent_bars = df.tail(50).to_dict("records")
+                    # Keep last 120 bars so rolling features (requiring >= 100 bars) are fully primed
+                    recent_bars = df.tail(120).to_dict("records")
                     self.price_buffers[ticker] = recent_bars
                     count += 1
                 except Exception as e:
                     print(f"  -> Warning warm-starting {ticker}: {e}")
+        if raw_dfs:
+            try:
+                self.strategy.market_df = compute_market_returns(raw_dfs)
+                print(f"[bot] Computed market returns across {len(raw_dfs)} tickers for live feature calculations.")
+            except Exception as e:
+                print(f"[bot] Warning computing market returns: {e}")
         print(f"[bot] Successfully warm-started {count}/{len(self.valid_tickers)} ticker buffers.")
 
     def sync_portfolio(self) -> None:
@@ -459,10 +468,10 @@ class TradingBot:
 
         buf = self.price_buffers[ticker]
         buf.append(bar)
-        if len(buf) > 60:
+        if len(buf) > 150:
             buf.pop(0)
 
-        if len(buf) < 20:
+        if len(buf) < 100:
             return
 
         buffer_df = pd.DataFrame(buf)
@@ -480,6 +489,7 @@ class TradingBot:
             news_score=news_score,
             current_cash=self.current_cash,
             current_date=sim_date,
+            market_df=getattr(self.strategy, "market_df", None),
         )
         latency_ms = (time.perf_counter() - t0) * 1000.0
         self.telemetry.record_latency(latency_ms)
