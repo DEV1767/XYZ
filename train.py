@@ -26,6 +26,8 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
+import lightgbm as lgb
+from catboost import CatBoostClassifier
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
@@ -494,6 +496,27 @@ def train_pipeline(include_news: bool = False) -> None:
 
     # 4. Define candidate models
     candidate_models: dict[str, Any] = {
+        "LightGBM": lgb.LGBMClassifier(
+            n_estimators=150,
+            max_depth=5,
+            num_leaves=31,
+            learning_rate=0.05,
+            min_child_samples=20,
+            reg_lambda=2.0,
+            class_weight="balanced",
+            random_state=RANDOM_STATE,
+            verbosity=-1,
+            n_jobs=-1,
+        ),
+        "CatBoost": CatBoostClassifier(
+            iterations=150,
+            depth=5,
+            learning_rate=0.05,
+            l2_leaf_reg=3.0,
+            auto_class_weights="Balanced",
+            random_seed=RANDOM_STATE,
+            verbose=0,
+        ),
         "HistGradientBoosting": HistGradientBoostingClassifier(
             max_iter=100,
             max_depth=4,
@@ -593,9 +616,10 @@ def train_pipeline(include_news: bool = False) -> None:
     print("=" * 90)
 
     # 8. Score Threshold Selection on Validation Data
-    # Target top 10% score percentile on validation set to capture high conviction signals
-    chosen_threshold = float(np.quantile(scores_val_oof, 0.90))
-    print(f"\n[train] Score Threshold chosen on Validation data (90th percentile): {chosen_threshold:.4f}")
+    # Target top 20% score percentile (capped between 0.52 and 0.60) to balance conviction with trade flow
+    raw_thresh = float(np.quantile(scores_val_oof, 0.80))
+    chosen_threshold = max(0.52, min(0.60, raw_thresh))
+    print(f"\n[train] Score Threshold chosen on Validation data (80th percentile capped): {chosen_threshold:.4f} (raw: {raw_thresh:.4f})")
     print(f"        (Val Precision above this threshold: {val_top_k['precision@top_10%']:.4f} vs Base Rate: {val_base_rate:.4f})")
 
     # 9. Refit Candidate Models and Champion on Train+Val (Development set)
