@@ -75,15 +75,14 @@ class StrategyEngine:
         self.use_strict_trend_filter: bool = True
         self.max_daily_entries: int = 2
 
-        # Load metadata if available (to get dynamically chosen threshold from walk-forward validation)
+        # PRED_BUY_THRESHOLD from config/.env governs the operational buy threshold
+        self.buy_threshold = PRED_BUY_THRESHOLD
         if metadata_path.exists():
             try:
                 meta = joblib.load(metadata_path)
-                if "chosen_threshold" in meta:
-                    self.buy_threshold = float(meta["chosen_threshold"])
-                    print(f"[strategy] Loaded validation-chosen threshold: {self.buy_threshold:.4f}")
+                print(f"[strategy] Active buy threshold: {self.buy_threshold:.4f} (Model validation reference: {meta.get('chosen_threshold', 0.55):.4f})")
             except Exception as e:
-                print(f"[strategy] Warning loading metadata ({e}), using default threshold: {self.buy_threshold:.4f}")
+                print(f"[strategy] Using active threshold: {self.buy_threshold:.4f}")
 
         # Load model and feature list
         if model_path.exists() and features_path.exists():
@@ -116,8 +115,8 @@ class StrategyEngine:
         self.valid_tickers = set(t.upper() for t in tickers)
 
     def get_effective_buy_threshold(self) -> float:
-        """Enforces high-conviction ML threshold (minimum 0.5500) to block low-probability noise."""
-        return max(self.buy_threshold, 0.5500)
+        """Enforces calibrated ML threshold (minimum 0.5200) to block low-probability noise."""
+        return max(self.buy_threshold, 0.5200)
 
     def calculate_risk_shares(
         self,
