@@ -260,32 +260,33 @@ class StrategyEngine:
                 "days_held": days_held,
             }
 
-        # 4. Take-Profit Target Reached: Lock in initial gain and activate Runner Trailing Stop
-        if latest_close >= pos["target_price"]:
-            pos["trailing_stop_active"] = True
-            lock_stop = round(entry * (1.0 + 1.2 * atr_pct), 2)
-            if lock_stop > pos["stop_price"]:
-                pos["stop_price"] = lock_stop
-            # Expand next profit target by +2 ATR so runner can compound
-            pos["target_price"] = round(latest_close * (1.0 + BARRIER_UP_ATR * atr_pct), 2)
+        # 4. Take-Profit Target Reached: Lock in profit!
+        if latest_close >= pos["target_price"] or (latest_close - entry) / entry >= 0.08:
+            pnl_pct = (latest_close - entry) / entry if entry > 0 else 0.0
+            return {
+                "ticker": ticker,
+                "action": "SELL",
+                "quantity": shares,
+                "price": latest_close,
+                "reason": f"TARGET / PROFIT LOCK REACHED (Close Rs.{latest_close:.2f} >= Target Rs.{pos['target_price']:.2f}, Gain: {pnl_pct:+.2%}). Locking in profit.",
+                "confidence": 1.0,
+                "news_score": news_score,
+                "days_held": days_held,
+            }
 
-        # 5. Time Exit after HORIZON_DAYS: Recycle flat/losing positions, let winners continue running
+        # 5. Time Exit after HORIZON_DAYS: Recycle capital
         if days_held >= HORIZON_DAYS:
             pnl_pct = (latest_close - entry) / entry if entry > 0 else 0.0
-            # If position is in profit and protected by trailing stop, let runner compound!
-            if pnl_pct > 0.01 and pos.get("trailing_stop_active", False):
-                pass
-            else:
-                return {
-                    "ticker": ticker,
-                    "action": "SELL",
-                    "quantity": shares,
-                    "price": latest_close,
-                    "reason": f"TIME EXIT (Horizon of {HORIZON_DAYS} days reached, held {days_held} days, P&L {pnl_pct:+.2%}). Recycling stagnant capital.",
-                    "confidence": 0.90,
-                    "news_score": news_score,
-                    "days_held": days_held,
-                }
+            return {
+                "ticker": ticker,
+                "action": "SELL",
+                "quantity": shares,
+                "price": latest_close,
+                "reason": f"TIME EXIT (Horizon of {HORIZON_DAYS} days reached, held {days_held} days, P&L {pnl_pct:+.2%}). Recycling capital.",
+                "confidence": 0.90,
+                "news_score": news_score,
+                "days_held": days_held,
+            }
 
         return None
 
