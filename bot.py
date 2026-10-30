@@ -28,6 +28,7 @@ sys.path.append(str(Path(__file__).resolve().parent))
 from config import (
     AUTH_HEADERS,
     BROKERAGE_FEE,
+    CASH_RESERVE_PCT,
     DATA_RAW_DIR,
     HEARTBEAT_API_URL,
     KAFKA_BOOTSTRAP_SERVERS,
@@ -313,16 +314,19 @@ class TradingBot:
 
         if action in ["BUY", "SHORT"]:
             order_cost = (quantity * price) + BROKERAGE_FEE
-            if order_cost > self.current_cash:
-                # Dynamically resize down to available cash if possible
-                affordable_qty = int((self.current_cash - BROKERAGE_FEE) // price)
+            # Enforce 15% cash reserve constraint so market allocation stays <= 85%
+            min_cash_reserve = 1000000.0 * CASH_RESERVE_PCT  # Rs. 150,000 liquid reserve
+            max_spendable = max(0.0, self.current_cash - min_cash_reserve)
+
+            if order_cost > max_spendable:
+                affordable_qty = int(max(0.0, max_spendable - BROKERAGE_FEE) // price)
                 if affordable_qty >= 1:
-                    print(f"[CLIENT RESIZE] Resizing {action} {ticker} from {quantity} to {affordable_qty} shares to match cash Rs. {self.current_cash:,.2f}.")
+                    print(f"[CLIENT RESIZE] Resizing {action} {ticker} from {quantity} to {affordable_qty} shares to maintain 15% cash reserve (85% market cap).")
                     quantity = affordable_qty
                 else:
-                    print(f"[SAFEGUARD] Aborting {action} {quantity} {ticker}: Cost Rs. {order_cost:,.2f} exceeds cash Rs. {self.current_cash:,.2f}.")
-                    self.telemetry.record_safeguard_block("Insufficient Capital")
-                    self.sim_logger.log_order(sim_date, ticker, action, quantity, price, "SAFEGUARD_BLOCKED", "Insufficient Capital")
+                    print(f"[SAFEGUARD] Aborting {action} {quantity} {ticker}: Cost Rs.{order_cost:,.2f} would breach 15% cash reserve (Current Cash: Rs.{self.current_cash:,.2f}, Min Reserve: Rs.{min_cash_reserve:,.2f}).")
+                    self.telemetry.record_safeguard_block("Cash Reserve Protected (85% Market Cap)")
+                    self.sim_logger.log_order(sim_date, ticker, action, quantity, price, "SAFEGUARD_BLOCKED", "Cash Reserve Protected")
                     return False
 
         elif action == "SELL":

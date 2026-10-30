@@ -146,14 +146,16 @@ class StrategyEngine:
         risk_budget = equity * 0.02
         risk_shares = int(risk_budget / per_share_risk)
 
-        # Capital cap: 25% of total equity
+        # Capital cap: MAX_POSITION_PCT (21.25% of total equity)
         max_capital = equity * MAX_POSITION_PCT
         cap_shares = int(max_capital / entry)
 
         shares = min(risk_shares, cap_shares)
 
-        # Cash constraint
-        max_cash_shares = int(max(0.0, (available_cash - BROKERAGE_FEE)) // entry)
+        # Cash constraint: Strictly preserve 15% cash reserve (Market allocation capped at 85%)
+        min_reserve = equity * CASH_RESERVE_PCT
+        spendable_cash = max(0.0, available_cash - min_reserve - BROKERAGE_FEE)
+        max_cash_shares = int(spendable_cash // entry)
         shares = min(shares, max_cash_shares)
 
         return shares if shares >= MIN_TRADE_SIZE else 0
