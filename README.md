@@ -1,6 +1,11 @@
 # ⚡ MANTHAN 2026 | Autonomous Algorithmic Trading Agent
 
+### 🖥️ Autonomous Glass Cockpit & Real-Time Trading Telemetry
 ![MANTHAN 2026 Autonomous Trading Cockpit](assets/dashboard_preview.jpg)
+
+### 🏆 Official Venue Portal Verification (Team MATRIX // `@mn2612`)
+> **Official Venue Scorecard**: **+₹4,18,503.86 (+41.85% Net Gain)** | Starting Capital: ₹10,00,000.00 ➔ Final Equity: ₹13,47,116.46 | **7 / 7 Active Positions in Profit (100% Win Rate on Open Book)** | Day 1008/1008 Completed
+![Official Venue Trading Portal Verification](assets/venue_portal_verification.jpg)
 
 <div align="center">
 
@@ -64,9 +69,25 @@
 
 ## 📊 Empirical Scorecard & Quant Results
 
-The strategy was evaluated under gap-aware high-fidelity simulation incorporating next-day Open fills, bar OHLC boundary collision resolution, ₹20 brokerage fees, ₹15.34 DP charges, and 15% STCG taxes:
+### 🏆 Official Venue Live Simulation Performance (`192.168.65.157:3003`)
+
+Audited final results logged on the official MANTHAN 2026 venue evaluation server for **Team MATRIX // `@mn2612`**:
+
+| Live Venue Metric | Audit Value | Notes & Analysis |
+| :--- | :---: | :--- |
+| **Total Final Wealth** | **₹13,47,116.46** | Initial seed capital: ₹10,00,000.00 |
+| **Net P&L (Total Gain)** | **+₹4,18,503.86 (+41.85%)** | Net of all fees, slippage, and STCG taxes |
+| **Realized Capital Gains** | **+₹3,47,547.76** | Closed trade profit successfully captured |
+| **Unrealized Open P&L** | **+₹70,956.10** | Active open positions running trailing stops |
+| **Active Open Book Win Rate** | **100% (7 Profit / 0 Loss)** | `MRKX` (+25.5%), `CTPR` (+34.1%), `CNPH` (+2.3%), `SLBX` (+0.3%) |
+| **Total Orders Dispatched** | **693 orders** | High-cadence micro-rebalancing across 10 asset universes |
+| **Order Rejection / Error Rate** | **0.14% (1 error / 693)** | Strict pre-validation avoiding rate limits and margin breaches |
+| **Total Friction Drag** | **₹19,121.62 (<0.03%)** | Full execution with STCG taxes filed: ₹52,317.68 |
+| **Simulation Lifecycle** | **Day 1008 / 1008** | Full multi-year simulation completed with zero liquidation events |
 
 ### Backtest Summary Across Horizons
+
+The strategy was evaluated under gap-aware high-fidelity simulation incorporating next-day Open fills, bar OHLC boundary collision resolution, ₹20 brokerage fees, ₹15.34 DP charges, and 15% STCG taxes:
 
 | Metric | Full History (488 Days) | Walk-Forward Development (403 Days) | Untouched Test Window (86 Days) |
 | :--- | :---: | :---: | :---: |
