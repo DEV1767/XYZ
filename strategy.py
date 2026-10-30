@@ -143,7 +143,7 @@ class StrategyEngine:
             # Fallback per-share risk if stop is invalid
             per_share_risk = entry * 0.05
 
-        risk_budget = equity * 0.01
+        risk_budget = equity * 0.02
         risk_shares = int(risk_budget / per_share_risk)
 
         # Capital cap: 25% of total equity
@@ -258,32 +258,32 @@ class StrategyEngine:
                 "days_held": days_held,
             }
 
-        # 4. Take-Profit Target Reached
+        # 4. Take-Profit Target Reached: Lock in initial gain and activate Runner Trailing Stop
         if latest_close >= pos["target_price"]:
-            return {
-                "ticker": ticker,
-                "action": "SELL",
-                "quantity": shares,
-                "price": latest_close,
-                "reason": f"TARGET REACHED (Close Rs.{latest_close:.2f} >= Target Rs.{pos['target_price']:.2f}).",
-                "confidence": 1.0,
-                "news_score": news_score,
-                "days_held": days_held,
-            }
+            pos["trailing_stop_active"] = True
+            lock_stop = round(entry * (1.0 + 1.2 * atr_pct), 2)
+            if lock_stop > pos["stop_price"]:
+                pos["stop_price"] = lock_stop
+            # Expand next profit target by +2 ATR so runner can compound
+            pos["target_price"] = round(latest_close * (1.0 + BARRIER_UP_ATR * atr_pct), 2)
 
-        # 5. Time Exit after HORIZON_DAYS
+        # 5. Time Exit after HORIZON_DAYS: Recycle flat/losing positions, let winners continue running
         if days_held >= HORIZON_DAYS:
             pnl_pct = (latest_close - entry) / entry if entry > 0 else 0.0
-            return {
-                "ticker": ticker,
-                "action": "SELL",
-                "quantity": shares,
-                "price": latest_close,
-                "reason": f"TIME EXIT (Horizon of {HORIZON_DAYS} days reached, held {days_held} days, P&L {pnl_pct:+.2%}).",
-                "confidence": 0.90,
-                "news_score": news_score,
-                "days_held": days_held,
-            }
+            # If position is in profit and protected by trailing stop, let runner compound!
+            if pnl_pct > 0.01 and pos.get("trailing_stop_active", False):
+                pass
+            else:
+                return {
+                    "ticker": ticker,
+                    "action": "SELL",
+                    "quantity": shares,
+                    "price": latest_close,
+                    "reason": f"TIME EXIT (Horizon of {HORIZON_DAYS} days reached, held {days_held} days, P&L {pnl_pct:+.2%}). Recycling stagnant capital.",
+                    "confidence": 0.90,
+                    "news_score": news_score,
+                    "days_held": days_held,
+                }
 
         return None
 

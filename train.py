@@ -27,7 +27,10 @@ import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 import lightgbm as lgb
-from catboost import CatBoostClassifier
+try:
+    from catboost import CatBoostClassifier
+except ImportError:
+    CatBoostClassifier = None
 from sklearn.metrics import (
     accuracy_score,
     f1_score,
@@ -507,15 +510,6 @@ def train_pipeline(include_news: bool = False) -> None:
             random_state=RANDOM_STATE,
             verbosity=-1,
             n_jobs=-1,
-        ),
-        "CatBoost": CatBoostClassifier(
-            iterations=150,
-            depth=5,
-            learning_rate=0.05,
-            l2_leaf_reg=3.0,
-            auto_class_weights="Balanced",
-            random_seed=RANDOM_STATE,
-            verbose=0,
         ),
         "HistGradientBoosting": HistGradientBoostingClassifier(
             max_iter=100,
