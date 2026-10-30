@@ -184,7 +184,7 @@ VAL_RATIO: float = 0.15
 TEST_RATIO: float = 0.15
 RANDOM_STATE: int = 42
 
-PRED_BUY_THRESHOLD: float = parse_float("PRED_BUY_THRESHOLD", os.getenv("PRED_BUY_THRESHOLD"), 0.52, min_val=0.5, max_val=1.0, min_inclusive=True, max_inclusive=False)
+PRED_BUY_THRESHOLD: float = parse_float("PRED_BUY_THRESHOLD", os.getenv("PRED_BUY_THRESHOLD"), 0.40, min_val=0.1, max_val=1.0, min_inclusive=True, max_inclusive=False)
 PRED_SELL_THRESHOLD: float = parse_float("PRED_SELL_THRESHOLD", os.getenv("PRED_SELL_THRESHOLD"), 0.35, min_val=0.0, max_val=0.5, min_inclusive=True, max_inclusive=False)
 ENABLE_SHORT_SELLING: bool = os.getenv("ENABLE_SHORT_SELLING", "False").lower() in ("true", "1", "yes")
 

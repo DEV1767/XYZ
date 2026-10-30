@@ -72,8 +72,8 @@ class StrategyEngine:
         self.inference_exception_count: int = 0
         self.score_history: list[float] = []
         self.use_trailing_median: bool = False
-        self.use_strict_trend_filter: bool = True
-        self.max_daily_entries: int = 2
+        self.use_strict_trend_filter: bool = False
+        self.max_daily_entries: int = 4
 
         # PRED_BUY_THRESHOLD from config/.env governs the operational buy threshold
         self.buy_threshold = PRED_BUY_THRESHOLD
@@ -115,8 +115,8 @@ class StrategyEngine:
         self.valid_tickers = set(t.upper() for t in tickers)
 
     def get_effective_buy_threshold(self) -> float:
-        """Enforces calibrated ML threshold (minimum 0.5200) to block low-probability noise."""
-        return max(self.buy_threshold, 0.5200)
+        """Returns the configured buy threshold (defaulting to PRED_BUY_THRESHOLD)."""
+        return self.buy_threshold
 
     def calculate_risk_shares(
         self,
