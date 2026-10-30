@@ -72,7 +72,7 @@ class StrategyEngine:
         self.inference_exception_count: int = 0
         self.score_history: list[float] = []
         self.use_trailing_median: bool = True
-        self.use_strict_trend_filter: bool = False
+        self.use_strict_trend_filter: bool = True
         self.max_daily_entries: int = 2
 
         # Load metadata if available (to get dynamically chosen threshold from walk-forward validation)

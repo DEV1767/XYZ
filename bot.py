@@ -76,6 +76,8 @@ class TradingBot:
         # Cache available cash
         self.current_cash = 1000000.0
         self.current_sim_date = ""
+        self.current_sim_day = 0
+        self.total_sim_days = 500
         self.tick_counter = 0
         self.refresh_cash_balance()
         self.sync_portfolio()
@@ -110,6 +112,8 @@ class TradingBot:
                 data = r.json()
                 sim_day = data.get("current_day", 0)
                 total_days = data.get("total_days", 500)
+                self.current_sim_day = sim_day
+                self.total_sim_days = total_days
                 rem_days = data.get("remaining_days", 0)
                 sim_date = data.get("simulated_date", "")
                 sec_left = data.get("estimated_time_remaining_sec", 0)
@@ -477,6 +481,16 @@ class TradingBot:
         if not ticker or ticker not in self.valid_tickers:
             return
 
+        # Check for simulation loop reset (server rewound backwards in time)
+        if self.current_sim_date and sim_date and sim_date < self.current_sim_date:
+            print(f"\n[LOOP RESET DETECTED] Server rewound from {self.current_sim_date} to {sim_date}!")
+            print("[LOOP RESET] Resetting internal indicator buffers and synchronizing fresh portfolio...")
+            self.price_buffers = defaultdict(list)
+            self.strategy.positions.clear()
+            self.warm_start_buffers()
+            self.sync_portfolio()
+            self.query_simulation_clock()
+
         close_price = float(data.get("close", 0.0))
         bar = {
             "date": pd.to_datetime(sim_date),
@@ -490,6 +504,22 @@ class TradingBot:
 
         # Log raw incoming tick to live simulation log
         self.sim_logger.log_tick(sim_date, ticker, bar["open"], bar["high"], bar["low"], bar["close"], bar["volume"])
+
+        # End-of-Cycle Liquidation Safeguard: Never carry open stock positions past Day 495
+        # into the cross-cycle rewind. Convert everything to 100% liquid cash!
+        if self.current_sim_day >= 495:
+            if ticker in self.strategy.positions:
+                pos = self.strategy.positions[ticker]
+                print(f"[CYCLE BOUNDARY] Day {self.current_sim_day} >= 495. Liquidating {ticker} into cash to protect capital!")
+                self.send_order(
+                    ticker=ticker,
+                    action="SELL",
+                    quantity=int(pos["shares"]),
+                    price=close_price,
+                    sim_date=sim_date,
+                    reason=f"CYCLE END LIQUIDATION (Day {self.current_sim_day}/500, converting to 100% cash)",
+                )
+            return
 
         buf = self.price_buffers[ticker]
         buf.append(bar)
