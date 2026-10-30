@@ -71,7 +71,7 @@ class StrategyEngine:
         self.buy_threshold: float = PRED_BUY_THRESHOLD
         self.inference_exception_count: int = 0
         self.score_history: list[float] = []
-        self.use_trailing_median: bool = True
+        self.use_trailing_median: bool = False
         self.use_strict_trend_filter: bool = True
         self.max_daily_entries: int = 2
 
@@ -116,11 +116,8 @@ class StrategyEngine:
         self.valid_tickers = set(t.upper() for t in tickers)
 
     def get_effective_buy_threshold(self) -> float:
-        """Returns the trailing 60-day median score if available, else static buy_threshold."""
-        if self.use_trailing_median and len(self.score_history) >= 20:
-            trailing = self.score_history[-600:]
-            return float(np.median(trailing))
-        return self.buy_threshold
+        """Enforces high-conviction ML threshold (minimum 0.5500) to block low-probability noise."""
+        return max(self.buy_threshold, 0.5500)
 
     def calculate_risk_shares(
         self,
