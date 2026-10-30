@@ -167,7 +167,7 @@ ATR_PERIOD: int = parse_int("ATR_PERIOD", os.getenv("ATR_PERIOD"), 14, min_val=2
 TARGET_FORWARD_DAYS: int = HORIZON_DAYS  # Alias for backward compatibility
 
 # Risk & Portfolio Controls
-STOP_LOSS_PCT: float = parse_float("STOP_LOSS_PCT", os.getenv("STOP_LOSS_PCT"), 0.05, min_val=0.0, max_val=0.5, min_inclusive=False, max_inclusive=False)
+STOP_LOSS_PCT: float = parse_float("STOP_LOSS_PCT", os.getenv("STOP_LOSS_PCT"), 0.06, min_val=0.0, max_val=0.5, min_inclusive=False, max_inclusive=False)
 TRAILING_STOP_PCT: float = parse_float("TRAILING_STOP_PCT", os.getenv("TRAILING_STOP_PCT"), 0.08, min_val=0.0, max_val=0.5, min_inclusive=False, max_inclusive=False)
 MIN_TRADE_SIZE: int = parse_int("MIN_TRADE_SIZE", os.getenv("MIN_TRADE_SIZE"), 1, min_val=1, max_val=100000)
 CASH_RESERVE_PCT: float = parse_float("CASH_RESERVE_PCT", os.getenv("CASH_RESERVE_PCT"), 0.12, min_val=0.0, max_val=0.5, min_inclusive=True, max_inclusive=False)
