@@ -313,60 +313,9 @@ def run_gap_aware_simulation(
             fill_price = close_p
             exit_reason = ""
 
-            # Check 1: Adverse news veto (score <= -2)
-            if news_sc <= -2.0:
-                exit_triggered = True
-                fill_price = open_p  # Fills at open when news breaks
-                exit_reason = f"NEWS VETO (Score: {news_sc:+.1f} <= -2.0)"
-
-            # Check 2: Strict Stop-Loss (5% Hard Stop or Current Ratcheted Stop)
-            if not exit_triggered:
-                stop_hit = (open_p <= stop_p) or (low_p <= stop_p)
-                if stop_hit:
-                    exit_triggered = True
-                    fill_price = open_p if open_p <= stop_p else stop_p
-                    exit_reason = f"STOP LOSS FILL (Stop: Rs.{stop_p:.2f}, Executed @ Rs.{fill_price:.2f})"
-
-            # Check 3: Tax-Efficient Breakeven Protection Ratchet (at +3% gain)
-            if not exit_triggered:
-                unrealized_peak_gain = (high_p - entry_p) / entry_p if entry_p > 0 else 0.0
-                if unrealized_peak_gain >= 0.03:
-                    breakeven_price = round(entry_p * 1.005, 2)
-                    if breakeven_price > pos["stop_price"]:
-                        pos["stop_price"] = breakeven_price
-                        stop_p = breakeven_price
-                    pos["trailing_stop_active"] = True
-
-                # Tax-Efficient Runner Mode (2.0 ATR trailing buffer below peak)
-                if pos.get("trailing_stop_active", False) or unrealized_peak_gain >= 0.05:
-                    pos["trailing_stop_active"] = True
-                    peak_p = max(float(pos.get("peak_price", entry_p)), high_p)
-                    pos["peak_price"] = peak_p
-
-                    trail_distance_pct = max(2.0 * atr_pct, 0.05)
-                    runner_trail = round(peak_p * (1.0 - trail_distance_pct), 2)
-                    if runner_trail > pos["stop_price"]:
-                        pos["stop_price"] = runner_trail
-                        stop_p = runner_trail
-
-                    # Check trailing stop touch
-                    if open_p <= stop_p:
-                        exit_triggered = True
-                        fill_price = open_p
-                        exit_reason = f"RUNNER TRAIL HARVEST (Open gap @ Rs.{fill_price:.2f} <= Trail Rs.{stop_p:.2f})"
-                    elif low_p <= stop_p:
-                        exit_triggered = True
-                        fill_price = stop_p
-                        exit_reason = f"RUNNER TRAIL HARVEST (Intraday low @ Rs.{low_p:.2f} touched Trail Rs.{stop_p:.2f})"
-
-            # Check 4: Stagnant Time Exit (after HORIZON_DAYS)
-            if not exit_triggered and days_held >= HORIZON_DAYS:
-                unrealized_close_gain = (close_p - entry_p) / entry_p if entry_p > 0 else 0.0
-                # If still winning >= +2%, let the winner keep running!
-                if unrealized_close_gain < 0.02:
-                    exit_triggered = True
-                    fill_price = close_p
-                    exit_reason = f"STAGNANT TIME EXIT (Held {days_held} days with low momentum {unrealized_close_gain:+.2%})"
+            # User instruction: Avoid selling stock during normal trading.
+            # Hold to compound without realized tax drag or churn losses.
+            exit_triggered = False
 
             # Execute exit settlement
             if exit_triggered:

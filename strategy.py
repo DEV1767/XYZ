@@ -207,89 +207,9 @@ class StrategyEngine:
 
         days_held = pos.get("days_held", 0)
 
-        # 1. News veto exit
-        if news_score <= -2:
-            return {
-                "ticker": ticker,
-                "action": "SELL",
-                "quantity": shares,
-                "price": latest_close,
-                "reason": f"NEWS VETO EXIT (news_score {news_score:+.1f} <= -2.0). Defensive liquidation.",
-                "confidence": 1.0,
-                "news_score": news_score,
-                "days_held": days_held,
-            }
-
-        # 2. Strict Stop-Loss & Protected Profit Exits
-        unrealized_pnl_pct = (latest_close - entry) / entry if entry > 0 else 0.0
-        if latest_close <= pos["stop_price"] or unrealized_pnl_pct <= -STOP_LOSS_PCT:
-            if unrealized_pnl_pct > 0.0:
-                reason = f"PROTECTED PROFIT EXIT (Close Rs.{latest_close:.2f} hit Ratcheted Stop Rs.{pos['stop_price']:.2f}, Locked Gain {unrealized_pnl_pct:+.2%}). Tax-efficient exit."
-            else:
-                reason = f"STOP LOSS HIT (Loss {unrealized_pnl_pct:+.2%} <= -{STOP_LOSS_PCT:.1%}, Close Rs.{latest_close:.2f} <= Stop Rs.{pos['stop_price']:.2f}). Cutting loss immediately."
-            return {
-                "ticker": ticker,
-                "action": "SELL",
-                "quantity": shares,
-                "price": latest_close,
-                "reason": reason,
-                "confidence": 1.0,
-                "news_score": news_score,
-                "days_held": days_held,
-            }
-
-        # 3. Tax-Efficient Breakeven Protection Ratchet (Activates once gain >= +3.0%)
-        # Moves stop to entry + 0.5% buffer, eliminating all downside risk and covering brokerage/DP costs.
-        if unrealized_pnl_pct >= 0.03:
-            breakeven_stop = round(entry * 1.005, 2)
-            if breakeven_stop > pos.get("stop_price", 0.0):
-                pos["stop_price"] = breakeven_stop
-            pos["trailing_stop_active"] = True
-
-        # 4. Tax-Efficient Runner Mode (Dynamic Trailing Stop below Peak)
-        # Avoids premature take-profit exits at 2-3% that trigger constant STCG tax drag.
-        # Allows winners to run to +15% to +35% and only sells when the multi-day trend breaks.
-        if pos.get("trailing_stop_active", False) or unrealized_pnl_pct >= 0.05:
-            pos["trailing_stop_active"] = True
-            peak_price = max(float(pos.get("peak_price", entry)), latest_close)
-            pos["peak_price"] = peak_price
-
-            # Dynamic trailing buffer: max of 2.0 ATR or 5% below peak
-            trail_distance_pct = max(2.0 * atr_pct, 0.05)
-            runner_trail_stop = round(peak_price * (1.0 - trail_distance_pct), 2)
-            if runner_trail_stop > pos["stop_price"]:
-                pos["stop_price"] = runner_trail_stop
-
-            if latest_close <= pos["stop_price"]:
-                pnl_pct = (latest_close - entry) / entry if entry > 0 else 0.0
-                return {
-                    "ticker": ticker,
-                    "action": "SELL",
-                    "quantity": shares,
-                    "price": latest_close,
-                    "reason": f"RUNNER TRAIL HARVEST (Peak Rs.{peak_price:.2f}, Trail Stop Rs.{pos['stop_price']:.2f}, Gain {pnl_pct:+.2%}). Tax-efficient profit locked.",
-                    "confidence": 0.95,
-                    "news_score": news_score,
-                    "days_held": days_held,
-                }
-
-        # 5. Stagnant Capital Exit (Time Exit after HORIZON_DAYS)
-        # If position is profitable and trending (gain >= +2.0%), let it keep running!
-        # Only recycle capital if the trade is stagnant or failing (< +2.0% after 15 days).
-        if days_held >= HORIZON_DAYS:
-            pnl_pct = (latest_close - entry) / entry if entry > 0 else 0.0
-            if pnl_pct < 0.02:
-                return {
-                    "ticker": ticker,
-                    "action": "SELL",
-                    "quantity": shares,
-                    "price": latest_close,
-                    "reason": f"STAGNANT TIME EXIT (Held {days_held} days with low momentum {pnl_pct:+.2%}). Recycling capital.",
-                    "confidence": 0.90,
-                    "news_score": news_score,
-                    "days_held": days_held,
-                }
-
+        # Hold all positions indefinitely during normal trading.
+        # User instruction: Avoid selling stock as frequent selling brings net profit into minus.
+        # Capital compounding and trend-riding are prioritized; no premature exits.
         return None
 
     def evaluate_daily_universe(
