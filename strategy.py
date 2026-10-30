@@ -15,8 +15,9 @@ Enforces:
    and selects top-N free slots (up to MAX_CONCURRENT_POSITIONS).
 7. Strict trend filters: require latest_close > sma_20 AND sma_5 > sma_20 (strict AND, not OR).
 8. News as veto only: score <= -2 blocks entry or forces defensive exit.
-9. Single risk parity sizing path: shares = (equity * 0.02) / (entry - stop_price),
-   capped at MAX_POSITION_PCT of equity (22%) and 88% total market allocation.
+9. Single risk parity sizing path with Confidence Conviction Scaling:
+   High confidence (>= 0.55) receives 100% full allocation;
+   Low confidence (<= 0.40) receives 50% half allocation to cut downside risk.
 """
 
 from __future__ import annotations
@@ -110,13 +111,15 @@ class StrategyEngine:
         entry: float,
         stop_price: float,
         available_cash: float,
+        confidence: float = 1.0,
     ) -> int:
         """
-        Single Risk Parity Sizing Path:
+        Risk Parity Sizing Path with Confidence Conviction Scaling:
           Risk budget = 2% of total equity
           Per-share risk = entry - stop_price
           shares = (equity * 0.02) / (entry - stop_price)
-          Capped at MAX_POSITION_PCT (22.0%) of equity and liquid cash.
+          Capped at MAX_POSITION_PCT of equity and liquid cash,
+          scaled smoothly between 0.50x (low confidence <= 0.40) and 1.00x (high confidence >= 0.55).
         """
         if entry <= 0 or equity <= 0:
             return 0
@@ -125,16 +128,27 @@ class StrategyEngine:
         if per_share_risk <= 0:
             per_share_risk = entry * 0.05
 
-        risk_budget = equity * 0.02
+        # Conviction scalar:
+        # score >= 0.55 -> 1.00x (full allocation ~Rs. 1,21,400)
+        # score <= 0.40 -> 0.50x (half allocation ~Rs. 60,000)
+        # smoothly scaled in between
+        if confidence <= 0.40:
+            conviction_scalar = 0.50
+        elif confidence >= 0.55:
+            conviction_scalar = 1.00
+        else:
+            conviction_scalar = 0.50 + 0.50 * ((confidence - 0.40) / 0.15)
+
+        risk_budget = equity * 0.02 * conviction_scalar
         risk_shares = int(risk_budget / per_share_risk)
 
-        # Capital cap: MAX_POSITION_PCT (22.0% of total equity)
-        max_capital = equity * MAX_POSITION_PCT
+        # Capital cap: MAX_POSITION_PCT of total equity scaled by conviction
+        max_capital = equity * MAX_POSITION_PCT * conviction_scalar
         cap_shares = int(max_capital / entry)
 
         shares = min(risk_shares, cap_shares)
 
-        # Cash constraint: Strictly preserve 12% cash reserve (Market allocation capped at 88%)
+        # Cash constraint: Strictly preserve 15% cash reserve (Market allocation capped at 85%)
         min_reserve = equity * CASH_RESERVE_PCT
         spendable_cash = max(0.0, available_cash - min_reserve - BROKERAGE_FEE)
         max_cash_shares = int(spendable_cash // entry)
@@ -283,7 +297,7 @@ class StrategyEngine:
         1. Checks exits and harvests for all held positions.
         2. Evaluates candidates passing golden-cross trend filters and news veto.
         3. If slots are full, performs Momentum Rotation (replaces dead-weight with top breakout).
-        4. Sizes and dispatches new high-conviction entries.
+        4. Sizes and dispatches new high-conviction entries using Confidence Conviction Scaling.
         """
         decisions: list[dict[str, Any]] = []
         news_map = daily_news_scores or {}
@@ -426,7 +440,7 @@ class StrategyEngine:
 
         selected = candidates[:min(self.max_daily_entries, free_slots)]
 
-        # 4. Single Risk Parity Sizing Path
+        # 4. Confidence-Weighted Risk Parity Sizing Path
         available_cash = current_cash
         for item in selected:
             tck = item["ticker"]
@@ -440,6 +454,7 @@ class StrategyEngine:
                 entry=entry,
                 stop_price=stop_price,
                 available_cash=available_cash,
+                confidence=float(item.get("score", 1.0)),
             )
 
             if shares < MIN_TRADE_SIZE:
@@ -654,12 +669,13 @@ class StrategyEngine:
         stop_price = round(latest_close * (1.0 - BARRIER_DOWN_ATR * atr_pct), 2)
         target_price = round(latest_close * (1.0 + BARRIER_UP_ATR * atr_pct), 2)
 
-        # Requirement 4e: Single Risk Parity Sizing Path
+        # Requirement 4e: Single Risk Parity Sizing Path with Confidence Conviction Scaling
         shares = self.calculate_risk_shares(
             equity=equity,
             entry=latest_close,
             stop_price=stop_price,
             available_cash=current_cash,
+            confidence=float(price_prob),
         )
 
         if shares < MIN_TRADE_SIZE:
