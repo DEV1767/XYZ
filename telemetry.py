@@ -50,6 +50,8 @@ class TelemetryTracker:
         self.margin_locked: float = 0.0
         self.realized_pnl: float = 0.0
         self.unrealized_pnl: float = 0.0
+        self.baseline_realized_pnl: float | None = None
+        self.session_realized_pnl: float = 0.0
         self.portfolio_market_value: float = 0.0
 
         # Pillar 2: Cash Utilization
@@ -151,7 +153,11 @@ class TelemetryTracker:
         self.margin_locked = float(data.get("margin_locked", self.margin_locked))
         self.current_wealth = float(data.get("total_wealth", data.get("total_portfolio_value", self.current_wealth)))
         self.portfolio_market_value = float(data.get("portfolio_market_value", self.portfolio_market_value))
-        self.realized_pnl = float(data.get("realized_pnl", self.realized_pnl))
+        raw_realized = float(data.get("realized_pnl", self.realized_pnl))
+        if self.baseline_realized_pnl is None:
+            self.baseline_realized_pnl = raw_realized
+        self.realized_pnl = raw_realized
+        self.session_realized_pnl = raw_realized - self.baseline_realized_pnl
         self.unrealized_pnl = float(data.get("unrealized_pnl", self.unrealized_pnl))
 
         server_util = data.get("cash_utilization_pct")
@@ -295,8 +301,10 @@ class TelemetryTracker:
         print(f"   * Current Total Wealth: Rs. {self.current_wealth:,.2f}  ({((self.current_wealth - self.initial_capital) / self.initial_capital):+.2%})")
         print(f"   * Liquid Cash Balance:  Rs. {self.available_cash:,.2f}")
         print(f"   * Locked Margin:        Rs. {self.margin_locked:,.2f}")
+        session_net = self.session_realized_pnl + self.unrealized_pnl
+        print(f"   * Active Session P&L:   Rs. {session_net:+,.2f}  (Session Realized: Rs.{self.session_realized_pnl:+,.2f})")
         print(f"   * Unrealized P&L:       Rs. {self.unrealized_pnl:+,.2f}")
-        print(f"   * Realized P&L:         Rs. {self.realized_pnl:+,.2f}")
+        print(f"   * Server Lifetime P&L:  Rs. {self.realized_pnl:+,.2f}  (Retained in venue server DB)")
         print("-" * 76)
         print(" [PILLAR 2] CASH UTILIZATION EFFICIENCY")
         print(f"   * Current Utilization:  {self.cash_utilization_pct:.1f}%")

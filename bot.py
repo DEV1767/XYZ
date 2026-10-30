@@ -42,6 +42,7 @@ from config import (
     SIMULATION_CLOCK_URL,
     STAGE_API_URL,
     STOCKS_API_URL,
+    STOP_LOSS_PCT,
 )
 from news_features import NewsStateBuffer
 from simulation_logger import sim_logger
@@ -211,11 +212,21 @@ class TradingBot:
                             avg_price = float(self.price_buffers[ticker][-1]["close"])
 
                         active_tickers_in_server.add(ticker)
+                        existing = self.strategy.positions.get(ticker, {})
+                        peak_price = max(avg_price, existing.get("peak_price", avg_price))
+                        stop_price = existing.get("stop_price", round(avg_price * (1.0 - STOP_LOSS_PCT), 2))
+                        target_price = existing.get("target_price", round(avg_price * 1.08, 2))
+
                         self.strategy.positions[ticker] = {
                             "type": pos_type,
                             "shares": shares,
                             "entry_price": avg_price,
-                            "days_held": self.strategy.positions.get(ticker, {}).get("days_held", 0),
+                            "stop_price": stop_price,
+                            "target_price": target_price,
+                            "peak_price": peak_price,
+                            "days_held": existing.get("days_held", 0),
+                            "trailing_stop_active": existing.get("trailing_stop_active", False),
+                            "last_evaluated_date": existing.get("last_evaluated_date", ""),
                         }
 
                 elif isinstance(holdings, dict):
@@ -241,12 +252,21 @@ class TradingBot:
                                 avg_price = float(self.price_buffers[ticker][-1]["close"])
 
                             active_tickers_in_server.add(ticker)
+                            existing = self.strategy.positions.get(ticker, {})
+                            peak_price = max(avg_price, existing.get("peak_price", avg_price))
+                            stop_price = existing.get("stop_price", round(avg_price * (1.0 - STOP_LOSS_PCT), 2))
+                            target_price = existing.get("target_price", round(avg_price * 1.08, 2))
+
                             self.strategy.positions[ticker] = {
                                 "type": pos_type,
                                 "shares": shares,
                                 "entry_price": avg_price,
-                                "peak_price": max(avg_price, self.strategy.positions.get(ticker, {}).get("peak_price", avg_price)),
-                                "days_held": self.strategy.positions.get(ticker, {}).get("days_held", 0),
+                                "stop_price": stop_price,
+                                "target_price": target_price,
+                                "peak_price": peak_price,
+                                "days_held": existing.get("days_held", 0),
+                                "trailing_stop_active": existing.get("trailing_stop_active", False),
+                                "last_evaluated_date": existing.get("last_evaluated_date", ""),
                             }
 
                 # Clean up any local positions that were closed on server

@@ -48,6 +48,7 @@ from config import (
     MODELS_DIR,
     PRED_BUY_THRESHOLD,
     PRED_SELL_THRESHOLD,
+    STOP_LOSS_PCT,
 )
 from features import compute_atr, compute_features_live
 
@@ -247,14 +248,15 @@ class StrategyEngine:
                     "days_held": days_held,
                 }
 
-        # 3. Strict Initial Stop-Loss
-        if latest_close <= pos["stop_price"]:
+        # 3. Strict Initial & Hard Stop-Loss (Capped at STOP_LOSS_PCT = 5%)
+        unrealized_pnl_pct = (latest_close - entry) / entry if entry > 0 else 0.0
+        if latest_close <= pos["stop_price"] or unrealized_pnl_pct <= -STOP_LOSS_PCT:
             return {
                 "ticker": ticker,
                 "action": "SELL",
                 "quantity": shares,
                 "price": latest_close,
-                "reason": f"STOP LOSS HIT (Close Rs.{latest_close:.2f} <= Stop Rs.{pos['stop_price']:.2f}).",
+                "reason": f"STOP LOSS HIT (Loss {unrealized_pnl_pct:+.2%} <= -{STOP_LOSS_PCT:.1%}, Close Rs.{latest_close:.2f} <= Stop Rs.{pos['stop_price']:.2f}). Cutting loss immediately.",
                 "confidence": 1.0,
                 "news_score": news_score,
                 "days_held": days_held,
@@ -529,7 +531,6 @@ class StrategyEngine:
                 current_date=current_date,
             )
             if exit_decision is not None:
-                self.positions.pop(ticker, None)
                 print(f"[strategy] EXECUTED EXIT for {ticker}: {exit_decision['reason']} | news_score: {news_score:+.1f}")
                 return exit_decision
 
