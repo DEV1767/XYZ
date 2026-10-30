@@ -334,18 +334,19 @@ class TradingBot:
 
         if action in ["BUY", "SHORT"]:
             order_cost = (quantity * price) + BROKERAGE_FEE
-            # Enforce 15% cash reserve constraint so market allocation stays <= 85%
-            min_cash_reserve = 1000000.0 * CASH_RESERVE_PCT  # Rs. 150,000 liquid reserve
+            # Enforce 12% cash reserve constraint so market allocation stays <= 88%
+            current_portfolio_val = self.telemetry.current_wealth if self.telemetry.current_wealth > 0 else 1000000.0
+            min_cash_reserve = current_portfolio_val * CASH_RESERVE_PCT  # 12% liquid reserve (88% market cap)
             max_spendable = max(0.0, self.current_cash - min_cash_reserve)
 
             if order_cost > max_spendable:
                 affordable_qty = int(max(0.0, max_spendable - BROKERAGE_FEE) // price)
                 if affordable_qty >= 1:
-                    print(f"[CLIENT RESIZE] Resizing {action} {ticker} from {quantity} to {affordable_qty} shares to maintain 15% cash reserve (85% market cap).")
+                    print(f"[CLIENT RESIZE] Resizing {action} {ticker} from {quantity} to {affordable_qty} shares to maintain 12% cash reserve (88% market cap).")
                     quantity = affordable_qty
                 else:
-                    print(f"[SAFEGUARD] Aborting {action} {quantity} {ticker}: Cost Rs.{order_cost:,.2f} would breach 15% cash reserve (Current Cash: Rs.{self.current_cash:,.2f}, Min Reserve: Rs.{min_cash_reserve:,.2f}).")
-                    self.telemetry.record_safeguard_block("Cash Reserve Protected (85% Market Cap)")
+                    print(f"[SAFEGUARD] Aborting {action} {quantity} {ticker}: Cost Rs.{order_cost:,.2f} would breach 12% cash reserve (Current Cash: Rs.{self.current_cash:,.2f}, Min Reserve: Rs.{min_cash_reserve:,.2f}).")
+                    self.telemetry.record_safeguard_block("Cash Reserve Protected (88% Market Cap)")
                     self.sim_logger.log_order(sim_date, ticker, action, quantity, price, "SAFEGUARD_BLOCKED", "Cash Reserve Protected")
                     return False
 
