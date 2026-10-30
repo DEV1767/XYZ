@@ -173,8 +173,8 @@ MIN_TRADE_SIZE: int = parse_int("MIN_TRADE_SIZE", os.getenv("MIN_TRADE_SIZE"), 1
 CASH_RESERVE_PCT: float = parse_float("CASH_RESERVE_PCT", os.getenv("CASH_RESERVE_PCT"), 0.15, min_val=0.0, max_val=0.5, min_inclusive=True, max_inclusive=False)
 MAX_SHORT_HOLD_DAYS: int = parse_int("MAX_SHORT_HOLD_DAYS", os.getenv("MAX_SHORT_HOLD_DAYS"), 9, min_val=1, max_val=30)
 ORDER_TIMEOUT_SEC: float = parse_float("ORDER_TIMEOUT_SEC", os.getenv("ORDER_TIMEOUT_SEC"), 5.0, min_val=0.1, max_val=60.0)
-MAX_CONCURRENT_POSITIONS: int = parse_int("MAX_CONCURRENT_POSITIONS", os.getenv("MAX_CONCURRENT_POSITIONS"), 5, min_val=1, max_val=20)
-MAX_POSITION_PCT: float = 0.17  # 4 x 21.25% = 85.0%   # Maximum 22.0% equity per position (4 x 22.0% = 88.0% max market allocation, 12% cash reserve)
+MAX_CONCURRENT_POSITIONS: int = parse_int("MAX_CONCURRENT_POSITIONS", os.getenv("MAX_CONCURRENT_POSITIONS"), 7, min_val=1, max_val=20)
+MAX_POSITION_PCT: float = 0.1214  # 7 x 12.14% = 85.0%  # 4 x 21.25% = 85.0%   # Maximum 22.0% equity per position (4 x 22.0% = 88.0% max market allocation, 12% cash reserve)
 
 # =====================================================================
 # Machine Learning Splits & Decision Thresholds

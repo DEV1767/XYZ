@@ -72,7 +72,7 @@ class StrategyEngine:
         self.score_history: list[float] = []
         self.use_trailing_median: bool = False
         self.use_strict_trend_filter: bool = True
-        self.max_daily_entries: int = 4
+        self.max_daily_entries: int = MAX_CONCURRENT_POSITIONS
 
         # PRED_BUY_THRESHOLD from config/.env governs the operational buy threshold
         self.buy_threshold = PRED_BUY_THRESHOLD
